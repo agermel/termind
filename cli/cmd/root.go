@@ -28,12 +28,13 @@ var rootCmd = &cobra.Command{
 用 ` + "`termind shell`" + ` 替代 zsh,失败的命令会自动获得 inline AI 诊断,
 体验跟原生 shell 完全一样。
 
-后续完成模块顺序:
-  M1 shell        进入 PTY 包装的 shell(当前)
-  M2 init         装 shell integration
-  M3 ─            内部:OSC 133 解析 + 命令缓冲
-  M4 pair         跟 openclaw 配对 + 长连接
-  M5 ─            内部:inline 流式诊断渲染`,
+子命令:
+  shell           进入 PTY 包装的交互式 shell
+  init            装 shell integration 到 ~/.zshrc
+
+模块进度:
+  [M1] PTY 包装  [M2] shell integration  [M3] OSC 133 解析
+  (后续 M4 pair + ws 长连;M5 inline 流式诊断)`,
 	Version:      Version,
 	SilenceUsage: true, // RunE 返错时不要重复打印 Usage,我们自己打日志
 }

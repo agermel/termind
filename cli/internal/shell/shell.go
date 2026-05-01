@@ -1,10 +1,11 @@
-// Package shell 实现 termind 的 PTY 透明包装(M1)。
+// Package shell 实现 termind 的 PTY 透明包装。
 //
-// 用 creack/pty 启动一个子 shell,把当前 tty 切到 raw mode,
+// M1:用 creack/pty 启动一个子 shell,把当前 tty 切到 raw mode,
 // 双向转发 stdin <-> ptmx,直到子 shell 退出。
 //
-// M1 阶段没有任何 AI 功能 —— 用起来跟原 zsh 一致。后续模块会在 PTY 流上
-// 加 OSC 133 解析(M3)、ws 转发(M4)、inline 渲染(M5)。
+// M3:在 ptmx -> stdout 那条链路上插入 OSC 133 parser 和命令组装器,
+// 识别命令边界并组装 Command 对象(TERMIND_DEBUG=1 时会写调试日志)。
+// Command 目前只被 debug log 消费;M4 会把它发给 openclaw。
 package shell
 
 import (
@@ -18,6 +19,10 @@ import (
 
 	"github.com/creack/pty"
 	"golang.org/x/term"
+
+	"termind/internal/cmdbuf"
+	"termind/internal/debuglog"
+	"termind/internal/osc133"
 )
 
 // Run 启动子 shell 并阻塞,直到 shell 退出。
@@ -82,15 +87,34 @@ func Run() error {
 	}
 	defer func() { _ = term.Restore(stdinFd, oldState) }()
 
-	// 双向 IO 转发
-	//   stdin -> ptmx:用户键盘 → 子 shell
-	//   ptmx -> stdout:子 shell 输出 → 用户屏幕
-	//
-	// stdin 那个 goroutine 我们不主动等它退出 —— ptmx.Close() 会让它 unblock。
-	go func() { _, _ = io.Copy(ptmx, os.Stdin) }()
-	_, _ = io.Copy(os.Stdout, ptmx)
+	// M3: 初始化调试日志(只在 TERMIND_DEBUG=1 时真正写文件)
+	debuglog.Init()
+	if debuglog.Enabled() {
+		debuglog.Logf("termind shell start: shell=%s", shellBin)
+		fmt.Fprintf(os.Stderr, "termind: debug log -> %s\n", debuglog.Path())
+	}
 
-	// io.Copy(stdout, ptmx) 返回 = 子 shell 已退出(ptmx 收到 EOF)。
+	// M3: 命令组装器。每条命令完成时触发回调 —— 目前只写 debug log,
+	// M4 会把 Command 推到 ws 客户端发给 openclaw。
+	buf := cmdbuf.NewBuffer(4*1024, func(c cmdbuf.Command) {
+		debuglog.Logf("cmd done: exit=%d dur=%s tail(%d): %q",
+			c.Exit, c.Duration().Round(1e6), len(c.Tail), truncate(c.Tail, 200))
+	})
+
+	// M3: parser downstream 是"先写屏幕,再累积进 Buffer 的 tail ring"。
+	// 这样用户看到的字节流跟 M2 一样,同时 Buffer 在背后组装 Command。
+	dual := cmdbuf.WriteAlongside{Primary: os.Stdout, Buffer: buf}
+	parser := osc133.NewParser(dual, buf.OnEvent)
+
+	// 双向 IO 转发:
+	//   stdin -> ptmx:用户键盘 → 子 shell(这一路不需要解析)
+	//   ptmx -> parser -> (stdout + buffer):子 shell 输出分发
+	//
+	// stdin goroutine 我们不主动等它退出 —— ptmx.Close() 会让它 unblock。
+	go func() { _, _ = io.Copy(ptmx, os.Stdin) }()
+	_, _ = io.Copy(parser, ptmx)
+
+	// io.Copy(parser, ptmx) 返回 = 子 shell 已退出(ptmx 收到 EOF)。
 	// 显式 Wait() 收割 zombie 进程,顺便拿子 shell 的退出码。
 	if err := c.Wait(); err != nil {
 		var exitErr *exec.ExitError
@@ -99,5 +123,15 @@ func Run() error {
 		}
 		// 子 shell 用非 0 退出码退出是合理情况(比如 exit 1),不当错误返回。
 	}
+	debuglog.Logf("termind shell exit")
 	return nil
+}
+
+// truncate 返回 b 的前 n 字节的字符串形态,超出部分用 "..." 代替。
+// 只给 debug log 用,不保证 UTF-8 边界。
+func truncate(b []byte, n int) string {
+	if len(b) <= n {
+		return string(b)
+	}
+	return string(b[:n]) + "..."
 }
