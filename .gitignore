@@ -1,0 +1,9 @@
+# Go build artifacts
+cli/termind
+
+# Runtime / debug logs
+cli/debug.log
+/debug.log
+
+# macOS
+.DS_Store

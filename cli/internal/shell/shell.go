@@ -9,6 +9,7 @@
 package shell
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -94,17 +95,25 @@ func Run() error {
 		fmt.Fprintf(os.Stderr, "termind: debug log -> %s\n", debuglog.Path())
 	}
 
-	// M3: 命令组装器。每条命令完成时触发回调 —— 目前只写 debug log,
-	// M4 会把 Command 推到 ws 客户端发给 openclaw。
+	// M5: dispatcher 把命令完成事件桥到 OpenClaw gateway 做诊断。
+	// 如果没 pair 或连不上,它会静默降级,不影响 shell 基本使用。
+	disp := newDispatcher(context.Background(), os.Stdout, os.Stderr, shellBin)
+	defer disp.Close()
+
+	// M3 + M5: 命令组装器。每条命令完成时既写 debug log,也交给 dispatcher 处理。
 	buf := cmdbuf.NewBuffer(4*1024, func(c cmdbuf.Command) {
 		debuglog.Logf("cmd done: exit=%d dur=%s tail(%d): %q",
 			c.Exit, c.Duration().Round(1e6), len(c.Tail), truncate(c.Tail, 200))
+		disp.OnCmdDone(c)
 	})
 
-	// M3: parser downstream 是"先写屏幕,再累积进 Buffer 的 tail ring"。
-	// 这样用户看到的字节流跟 M2 一样,同时 Buffer 在背后组装 Command。
+	// M3 + M5: parser downstream 是"先写屏幕,再累积进 Buffer 的 tail ring"。
+	// onEvent 先喂 cmdbuf,再交给 dispatcher(后者在命令开始时取消进行中诊断)。
 	dual := cmdbuf.WriteAlongside{Primary: os.Stdout, Buffer: buf}
-	parser := osc133.NewParser(dual, buf.OnEvent)
+	parser := osc133.NewParser(dual, func(ev osc133.Event) {
+		buf.OnEvent(ev)
+		disp.OnShellEvent(ev)
+	})
 
 	// 双向 IO 转发:
 	//   stdin -> ptmx:用户键盘 → 子 shell(这一路不需要解析)
