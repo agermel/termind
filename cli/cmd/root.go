@@ -31,10 +31,12 @@ var rootCmd = &cobra.Command{
 子命令:
   shell           进入 PTY 包装的交互式 shell
   init            装 shell integration 到 ~/.zshrc
+  pair            跟 OpenClaw 服务器配对
+  status          只读展示身份 / 配对 / integration 状态
 
 模块进度:
-  [M1] PTY 包装  [M2] shell integration  [M3] OSC 133 解析
-  (后续 M4 pair + ws 长连;M5 inline 流式诊断)`,
+  [M1] PTY 包装  [M2] shell integration  [M3] OSC 133 解析  [M4] pair + ws 长连
+  (后续 M5 inline 流式诊断)`,
 	Version:      Version,
 	SilenceUsage: true, // RunE 返错时不要重复打印 Usage,我们自己打日志
 }

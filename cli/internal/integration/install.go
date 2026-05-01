@@ -85,3 +85,22 @@ func Install() (Result, error) {
 
 	return Result{ScriptPath: scriptPath, RcPath: rcPath}, nil
 }
+
+// IsInstalled 只读地检查 ~/.zshrc 是否已经有 termind integration 标记。
+// 给 `termind status` 用,不做任何副作用。
+//
+// 读不到 zshrc(比如不存在)等同于"未安装",不当作错误。
+func IsInstalled() (bool, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false, err
+	}
+	rc, err := os.ReadFile(filepath.Join(home, ".zshrc"))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return strings.Contains(string(rc), beginMarker), nil
+}
