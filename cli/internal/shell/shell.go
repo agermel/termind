@@ -45,7 +45,10 @@ func Run() error {
 	}
 
 	c := exec.Command(shellBin)
-	c.Env = os.Environ()
+	// TERMIND_SHELL=1 是给 ~/.config/termind/integration.zsh 看的开关:
+	// 它在被 zshrc 无条件 source 时,只有看到这个变量才会真正注册 OSC 133 hook。
+	// 这样普通 zsh(用户没进 termind shell 时)零开销。
+	c.Env = append(os.Environ(), "TERMIND_SHELL=1")
 
 	ptmx, err := pty.Start(c)
 	if err != nil {
