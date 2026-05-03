@@ -3,8 +3,7 @@
 // 子命令清单(每个有自己的 .go 文件):
 //
 //	shell     — 进入 termind 包装的交互式 shell(warp 模式)
-//	init      — 首次配置:装 shell integration + 跟 openclaw 配对(后续 M2/M4)
-//	pair      — 重新配对 / 切换 openclaw 服务器(后续 M4)
+//	init      — 首次配置:装 shell integration + 连接 OpenClaw
 //
 // 设计原则:
 //   - 每个子命令一个文件,通过 init() 用 rootCmd.AddCommand 注册自己
@@ -30,13 +29,12 @@ var rootCmd = &cobra.Command{
 
 子命令:
   shell           进入 PTY 包装的交互式 shell
-  init            装 shell integration 到 ~/.zshrc
-  pair            跟 OpenClaw 服务器配对
+  init            配置 shell integration 并连接 OpenClaw
   status          只读展示身份 / 配对 / integration 状态
 
 模块进度:
   [M1] PTY 包装  [M2] shell integration  [M3] OSC 133 解析
-  [M4] pair + ws 长连  [M5] inline 流式诊断
+  [M4] OpenClaw device approval + ws 长连  [M5] inline 流式诊断
   [M6] OpenClaw plugin(待做)`,
 	Version:      Version,
 	SilenceUsage: true, // RunE 返错时不要重复打印 Usage,我们自己打日志

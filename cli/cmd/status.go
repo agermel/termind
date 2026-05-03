@@ -41,9 +41,12 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 	} else {
 		fmt.Fprintf(out, "config:       %s\n", cfgPath)
 		if cfg.ServerURL == "" {
-			fmt.Fprintln(out, "  server:     (未配对,请运行 termind pair --server ...)")
+			fmt.Fprintln(out, "  server:     (未配置,请运行 termind init)")
 		} else {
 			fmt.Fprintf(out, "  server:     %s\n", cfg.ServerURL)
+			if cfg.Role != "" {
+				fmt.Fprintf(out, "  role:       %s\n", cfg.Role)
+			}
 			if !cfg.PairedAt.IsZero() {
 				fmt.Fprintf(out, "  paired at:  %s\n", cfg.PairedAt.Format("2006-01-02 15:04:05 MST"))
 			}
@@ -52,7 +55,7 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 
 	// 2. 身份
 	if _, err := os.Stat(mustKeyPath()); os.IsNotExist(err) {
-		fmt.Fprintln(out, "\nidentity:     (尚未生成,运行 termind pair 时会自动创建)")
+		fmt.Fprintln(out, "\nidentity:     (尚未生成,运行 termind init 时会自动创建)")
 	} else {
 		id, err := identity.LoadOrCreate()
 		if err != nil {
