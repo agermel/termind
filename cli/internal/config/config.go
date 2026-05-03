@@ -1,6 +1,6 @@
 // Package config 管理 termind 的全局配置文件: ~/.config/termind/config.json。
 //
-// 当前字段很少,只存"已配对的 server URL"和"最近配对时间"。
+// 当前字段很少,只存"已批准的 server URL / role"和"最近批准时间"。
 // 随着 M4/M5 推进可以继续加字段(日志级别、默认超时等)。
 //
 // 之所以用 JSON 而不是 TOML:
@@ -24,9 +24,11 @@ import (
 // ~/.config/termind/keys/;一来它们的权限敏感度不同,二来单独存便于
 // 吊销(删 token 即可)。
 type Config struct {
-	// ServerURL 是最近一次 pair 成功的 OpenClaw server。shell 启动时自动连这个。
+	// ServerURL 是最近一次 device approval 成功的 OpenClaw server。shell 启动时自动连这个。
 	ServerURL string `json:"server_url,omitempty"`
-	// PairedAt 记录配对成功的时间,仅展示用。
+	// Role 是最近一次 device approval 成功的 OpenClaw device role。termind 默认作为 node。
+	Role string `json:"role,omitempty"`
+	// PairedAt 记录设备批准成功的时间,仅展示用。
 	PairedAt time.Time `json:"paired_at,omitempty"`
 }
 

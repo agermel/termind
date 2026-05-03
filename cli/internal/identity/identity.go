@@ -5,8 +5,8 @@
 //	~/.config/termind/keys/device.key   私钥,PEM 编码,权限 0600
 //	~/.config/termind/keys/device.pub   公钥,PEM 编码,权限 0644
 //
-// 私钥绝不离开本机。公钥在 pair 阶段上报给 OpenClaw,并作为 device_id
-// 的衍生来源(device_id = sha256(pubkey)[:16] 的 hex)。
+// 私钥绝不离开本机。公钥在 pair/connect 阶段上报给 OpenClaw,并作为 device_id
+// 的衍生来源(device_id = sha256(raw ed25519 public key) 的 hex)。
 //
 // 典型用法:
 //
@@ -19,6 +19,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
@@ -82,16 +83,17 @@ func (id *Identity) PublicKey() ed25519.PublicKey {
 	return out
 }
 
-// PublicKeyPEM 返回公钥的 PEM 编码,给 pair 阶段 POST 给 server 用。
-func (id *Identity) PublicKeyPEM() []byte {
-	return pem.EncodeToMemory(&pem.Block{Type: "ED25519 PUBLIC KEY", Bytes: id.pub})
+// PublicKeyBase64URL 返回 OpenClaw Gateway connect.device.publicKey 要求的
+// raw ed25519 公钥 base64url(无 padding)。
+func (id *Identity) PublicKeyBase64URL() string {
+	return base64.RawURLEncoding.EncodeToString(id.pub)
 }
 
-// DeviceID 是公钥的稳定短标识(sha256 前 16 字节 hex,共 32 字符)。
-// 用作 OpenClaw 侧的设备 ID 和本地日志前缀。
+// DeviceID 是 OpenClaw 设备身份的稳定标识: sha256(raw public key) hex。
+// 用作 OpenClaw 侧的 device.id 和本地日志前缀。
 func (id *Identity) DeviceID() string {
 	h := sha256.Sum256(id.pub)
-	return hex.EncodeToString(h[:16])
+	return hex.EncodeToString(h[:])
 }
 
 // Fingerprint 给人看的短指纹: SHA256:XXXX-XXXX-XXXX(前 12 字符 base32 友好分组)。

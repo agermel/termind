@@ -96,8 +96,8 @@ func TestDeviceIDStable(t *testing.T) {
 		t.Fatal(err)
 	}
 	did := id.DeviceID()
-	if len(did) != 32 {
-		t.Fatalf("device id len = %d, want 32 (hex of 16 bytes)", len(did))
+	if len(did) != 64 {
+		t.Fatalf("device id len = %d, want 64 (hex of 32 bytes)", len(did))
 	}
 	// 同 identity 两次调用必须稳定
 	if did != id.DeviceID() {

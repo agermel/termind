@@ -24,6 +24,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 
 	want := &Config{
 		ServerURL: "https://openclaw.example.com",
+		Role:      "operator",
 		PairedAt:  time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC),
 	}
 	if err := Save(want); err != nil {
@@ -46,6 +47,9 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 	if got.ServerURL != want.ServerURL {
 		t.Fatalf("ServerURL = %q, want %q", got.ServerURL, want.ServerURL)
+	}
+	if got.Role != want.Role {
+		t.Fatalf("Role = %q, want %q", got.Role, want.Role)
 	}
 	if !got.PairedAt.Equal(want.PairedAt) {
 		t.Fatalf("PairedAt = %v, want %v", got.PairedAt, want.PairedAt)

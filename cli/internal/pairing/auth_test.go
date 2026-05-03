@@ -6,73 +6,131 @@ import (
 	"termind/internal/identity"
 )
 
-func TestSignChallenge_RoundTrip(t *testing.T) {
+func TestBuildDeviceDescriptor_RoundTrip(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	id, err := identity.LoadOrCreate()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	ch := &ChallengeMessage{Type: MsgTypeChallenge, Nonce: "random-nonce-base64", Realm: "openclaw-test"}
-	auth, err := SignChallenge(id, ch, "my-token", "0.0.1-test")
+	in := DeviceAuthInput{
+		Identity:     id,
+		Token:        "my-token",
+		Nonce:        "random-nonce-base64",
+		SignedAtMs:   1234567890,
+		ClientID:     "gateway-client",
+		ClientMode:   "backend",
+		Role:         "operator",
+		Scopes:       []string{"operator.write"},
+		Platform:     "Darwin",
+		DeviceFamily: "Desktop",
+	}
+	dev, err := BuildDeviceDescriptor(in)
 	if err != nil {
-		t.Fatalf("SignChallenge: %v", err)
+		t.Fatalf("BuildDeviceDescriptor: %v", err)
 	}
-	if auth.Type != MsgTypeAuth {
-		t.Fatalf("type=%s", auth.Type)
+	if dev.ID != id.DeviceID() {
+		t.Fatalf("device id mismatch: %s vs %s", dev.ID, id.DeviceID())
 	}
-	if auth.DeviceID != id.DeviceID() {
-		t.Fatalf("device id mismatch: %s vs %s", auth.DeviceID, id.DeviceID())
+	if dev.PublicKey != id.PublicKeyBase64URL() {
+		t.Fatalf("public key mismatch")
 	}
-	if auth.Token != "my-token" {
-		t.Fatalf("token wrong")
+	if dev.Signature == "" {
+		t.Fatal("signature should be set")
 	}
-	// 自洽验签
-	if err := VerifyAuth(id.PublicKey(), auth, ch.Nonce); err != nil {
-		t.Fatalf("VerifyAuth: %v", err)
-	}
-}
-
-func TestSignChallenge_MissingToken(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	id, _ := identity.LoadOrCreate()
-	ch := &ChallengeMessage{Type: MsgTypeChallenge, Nonce: "n"}
-	if _, err := SignChallenge(id, ch, "", "test"); err == nil {
-		t.Fatal("expected error on empty token")
+	if err := VerifyDeviceDescriptor(id.PublicKey(), dev, in); err != nil {
+		t.Fatalf("VerifyDeviceDescriptor: %v", err)
 	}
 }
 
-func TestSignChallenge_BadType(t *testing.T) {
+func TestBuildDeviceAuthPayloadV3_MatchesOpenClawShape(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	id, _ := identity.LoadOrCreate()
-	ch := &ChallengeMessage{Type: "nope", Nonce: "n"}
-	if _, err := SignChallenge(id, ch, "tok", "test"); err == nil {
-		t.Fatal("expected error on bad type")
-	}
-}
-
-func TestVerifyAuth_TamperedNonce(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	id, _ := identity.LoadOrCreate()
-	ch := &ChallengeMessage{Type: MsgTypeChallenge, Nonce: "nonce-A"}
-	auth, err := SignChallenge(id, ch, "tok", "test")
+	id, err := identity.LoadOrCreate()
 	if err != nil {
 		t.Fatal(err)
 	}
-	// server 试图用错误 nonce 验签,必须失败
-	if err := VerifyAuth(id.PublicKey(), auth, "nonce-B"); err == nil {
-		t.Fatal("VerifyAuth should fail on nonce mismatch")
+	got := BuildDeviceAuthPayloadV3(DeviceAuthInput{
+		Identity:     id,
+		Token:        "tok",
+		Nonce:        "nonce",
+		SignedAtMs:   42,
+		ClientID:     "gateway-client",
+		ClientMode:   "backend",
+		Role:         "operator",
+		Scopes:       []string{"operator.write"},
+		Platform:     "Darwin",
+		DeviceFamily: "Desktop",
+	})
+	want := "v3|" + id.DeviceID() + "|gateway-client|backend|operator|operator.read,operator.write|42|tok|nonce|darwin|desktop"
+	if got != want {
+		t.Fatalf("payload mismatch:\ngot  %q\nwant %q", got, want)
 	}
 }
 
-func TestVerifyAuth_TamperedToken(t *testing.T) {
+func TestBuildDeviceAuthPayloadV3_DefaultsToOpenClawOperator(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	id, err := identity.LoadOrCreate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := BuildDeviceAuthPayloadV3(DeviceAuthInput{
+		Identity:   id,
+		Token:      "tok",
+		Nonce:      "nonce",
+		SignedAtMs: 42,
+	})
+	want := "v3|" + id.DeviceID() + "|cli|cli|operator||42|tok|nonce|" + DefaultPlatform() + "|"
+	if got != want {
+		t.Fatalf("payload mismatch:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestBuildDeviceDescriptor_MissingNonce(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	id, _ := identity.LoadOrCreate()
-	ch := &ChallengeMessage{Type: MsgTypeChallenge, Nonce: "n"}
-	auth, _ := SignChallenge(id, ch, "tok-real", "test")
-	// 攻击者改 token 但保留 signature: 验签必须失败
-	auth.Token = "tok-fake"
-	if err := VerifyAuth(id.PublicKey(), auth, "n"); err == nil {
-		t.Fatal("VerifyAuth should fail when token changed after sign")
+	if _, err := BuildDeviceDescriptor(DeviceAuthInput{
+		Identity:   id,
+		Token:      "tok",
+		SignedAtMs: 1,
+	}); err == nil {
+		t.Fatal("expected error on empty nonce")
+	}
+}
+
+func TestVerifyDeviceDescriptor_TamperedNonce(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	id, _ := identity.LoadOrCreate()
+	in := DeviceAuthInput{
+		Identity:   id,
+		Token:      "tok",
+		Nonce:      "nonce-A",
+		SignedAtMs: 1,
+	}
+	dev, err := BuildDeviceDescriptor(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev.Nonce = "nonce-B"
+	if err := VerifyDeviceDescriptor(id.PublicKey(), dev, in); err == nil {
+		t.Fatal("VerifyDeviceDescriptor should fail on nonce mismatch")
+	}
+}
+
+func TestVerifyDeviceDescriptor_TamperedToken(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	id, _ := identity.LoadOrCreate()
+	in := DeviceAuthInput{
+		Identity:   id,
+		Token:      "tok-real",
+		Nonce:      "n",
+		SignedAtMs: 1,
+	}
+	dev, err := BuildDeviceDescriptor(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Token = "tok-fake"
+	if err := VerifyDeviceDescriptor(id.PublicKey(), dev, in); err == nil {
+		t.Fatal("VerifyDeviceDescriptor should fail when token changed after sign")
 	}
 }
