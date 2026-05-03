@@ -40,6 +40,10 @@ import (
 // 任何步骤的错误都会被原样返回,由调用方决定打印形态。
 // 子 shell 用非 0 退出码退出不视为本函数错误。
 func Run() error {
+	if os.Getenv("TERMIND_SHELL") == "1" {
+		return errors.New("已经在 termind shell 中,不要嵌套启动;输入 exit 退出当前 shell")
+	}
+
 	stdinFd := int(os.Stdin.Fd())
 	if !term.IsTerminal(stdinFd) {
 		return errors.New("termind shell 需要在交互式终端中运行")
@@ -97,7 +101,7 @@ func Run() error {
 
 	// M5: dispatcher 把命令完成事件桥到 OpenClaw gateway 做诊断。
 	// 如果没 pair 或连不上,它会静默降级,不影响 shell 基本使用。
-	disp := newDispatcher(context.Background(), os.Stdout, os.Stderr, shellBin)
+	disp := newDispatcher(context.Background(), os.Stdout, os.Stderr, shellBin, c)
 	defer disp.Close()
 
 	// M3 + M5: 命令组装器。每条命令完成时既写 debug log,也交给 dispatcher 处理。

@@ -1,8 +1,14 @@
 package cmd
 
 import (
+	"fmt"
+
 	"github.com/spf13/cobra"
 
+	"termind/internal/config"
+	"termind/internal/identity"
+	"termind/internal/integration"
+	"termind/internal/pairing"
 	"termind/internal/shell"
 )
 
@@ -28,7 +34,75 @@ var shellCmd = &cobra.Command{
 }
 
 func runShell(_ *cobra.Command, _ []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if cfg.ServerURL == "" {
+		fmt.Println("第一次使用 termind,先完成 OpenClaw 连接引导。")
+		fmt.Println()
+		if err := runInitFromShell(); err != nil {
+			return err
+		}
+		fmt.Println()
+	} else {
+		ready, err := hasCurrentDeviceAuth(cfg)
+		if err != nil {
+			return err
+		}
+		if !ready {
+			fmt.Println("termind 需要刷新 OpenClaw 连接权限。")
+			fmt.Println()
+			if err := runInitFromShell(); err != nil {
+				return err
+			}
+			fmt.Println()
+		}
+	}
+	if err := refreshShellIntegration(); err != nil {
+		return err
+	}
 	return shell.Run()
+}
+
+func runInitFromShell() error {
+	initContinueShell = true
+	defer func() { initContinueShell = false }()
+	return runInit(rootCmd, nil)
+}
+
+func hasCurrentDeviceAuth(cfg *config.Config) (bool, error) {
+	if cfg == nil || cfg.ServerURL == "" {
+		return false, nil
+	}
+	if cfg.Role != "" && cfg.Role != pairing.DefaultRole {
+		return false, nil
+	}
+	id, err := identity.LoadOrCreate()
+	if err != nil {
+		return false, fmt.Errorf("load identity: %w", err)
+	}
+	role := cfg.Role
+	if role == "" {
+		role = pairing.DefaultRole
+	}
+	auth, err := pairing.LoadDeviceAuth(id.DeviceID(), role)
+	if err != nil {
+		return false, fmt.Errorf("load device auth: %w", err)
+	}
+	return auth != nil && auth.Token != "", nil
+}
+
+func refreshShellIntegration() error {
+	r, err := integration.Install()
+	if err != nil {
+		return err
+	}
+	if r.AlreadyInstalled {
+		return nil
+	}
+	fmt.Printf("✓ shell integration 安装成功: %s\n\n", r.RcPath)
+	return nil
 }
 
 func init() {

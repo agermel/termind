@@ -9,6 +9,8 @@
 #   D;<exit>   命令结束(带退出码)
 #
 # B(prompt 结束/输入开始)M2 不注入 PS1 —— 后续 M5 prompt 抑制需要时再加。
+# termind 诊断输出结束时会给子 zsh 发 SIGUSR1;这里用 zle 自己刷新显示,
+# 不往 PTY 注入 Ctrl-R 之类会改变用户输入状态的按键。
 
 # 不在 termind shell 里就立刻 return,普通 zsh 零代价
 [[ -z "$TERMIND_SHELL" ]] && return 0
@@ -32,6 +34,10 @@ __termind_precmd() {
 # preexec:命令执行前触发(用户已按回车)
 __termind_preexec() {
     printf '\e]133;C\a'
+}
+
+TRAPUSR1() {
+    [[ -o zle ]] && zle -I
 }
 
 autoload -Uz add-zsh-hook

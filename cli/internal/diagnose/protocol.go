@@ -5,27 +5,30 @@
 //	protocol.go — 定义跟 OpenClaw plugin 共享的 DTO 和方法名
 //	client.go   — 在 gateway.Conn 上封装 Start(ctx, req) -> <-chan Event
 //
-// 协议语义(JSON-RPC over WebSocket):
+// 协议语义(OpenClaw Gateway frames over WebSocket):
 //
-//	client  -->  diagnose.start    (Request, 返回 {stream_id})
-//	server  -->  diagnose.token    (Notification, 带 stream_id + delta,
-//	                                最后一帧 done=true 可带 final 摘要)
-//	client  -->  diagnose.cancel   (Notification, 带 stream_id,取消进行中的诊断)
+//	client  -->  req/agent         (payload 返回 {runId})
+//	client  -->  req/agent.wait    (等待 run 完成)
+//	client  -->  req/sessions.get  (读取本轮 assistant 回复)
 //
 // 设计要点:
-//   - stream_id 由 server 分配,client 不要自己生:不同 server 实现策略可能不同
-//   - token 流是 Notification 不是 Response,server 可以随时推、数量不定
-//   - cancel 是 Notification 不是 Call:client 按下就走,不等 server 回
+//   - 不再调用未注册的 diagnose.start: OpenClaw 会把未知 operator 方法按
+//     operator.admin 处理,不适合 setup-code approve 后的普通 operator.write 设备。
+//   - agent/agent.wait/sessions.get 都是 OpenClaw 官方 operator read/write 方法。
+//   - 对 shell 侧仍暴露事件 channel,方便以后换成插件流式 token 协议而不改 UI 层。
 package diagnose
 
-// JSON-RPC method 名,集中一处改。
+// Gateway method 名,集中一处改。
 const (
-	MethodStart  = "diagnose.start"
-	MethodToken  = "diagnose.token"
-	MethodCancel = "diagnose.cancel"
+	MethodAgent       = "agent"
+	MethodAgentWait   = "agent.wait"
+	MethodSessionsGet = "sessions.get"
+
+	defaultSessionKey = "agent:main:termind"
+	defaultLabel      = "termind"
 )
 
-// Request 是 diagnose.start 的 params。
+// Request 是一次 termind shell 诊断的输入。
 //
 // 字段:
 //   - Command      用户实际输入的命令(zsh 里从 history 拿)
@@ -43,30 +46,15 @@ type Request struct {
 	Lang       string `json:"lang,omitempty"`
 }
 
-// StartResponse 是 diagnose.start 的 result。
+// TokenEvent 是 shell 层消费的诊断事件。
 //
-// 收到后 client 立刻进入"等 token notification"的流式阶段。
-type StartResponse struct {
-	StreamID string `json:"stream_id"`
-}
-
-// TokenEvent 是 diagnose.token notification 的 params。
-//
-// 一次诊断会收到多次 TokenEvent,顺序有意义。
-// 最后一帧 Done=true,可能附加 Final(结构化摘要,M6 plugin 实现时定具体字段)。
+// 当前 agent flow 只有一次 Delta + Done;未来如果 termind OpenClaw plugin 提供
+// 流式 gateway method,可以继续复用这个 DTO。
 type TokenEvent struct {
-	StreamID string `json:"stream_id"`
-	// Delta 本次新增的文本(增量,非全量)。空字符串表示"只是心跳/状态位变更"。
-	Delta string `json:"delta,omitempty"`
-	// Done 标记流的终止;true 时此帧之后不会再有同 stream_id 的 token
-	Done bool `json:"done,omitempty"`
-	// Error 非空表示 server 侧出错终止;client 应当把错误展示给用户
+	// Delta 本次新增的文本。空字符串表示"只是状态位变更"。
+	Delta string
+	// Done 标记流终止;true 时此帧之后不会再有同一次诊断的 token。
+	Done bool
+	// Error 非空表示 server 侧出错终止;client 应当把错误展示给用户。
 	Error string `json:"error,omitempty"`
-}
-
-// CancelNotification 是 diagnose.cancel 的 params。
-type CancelNotification struct {
-	StreamID string `json:"stream_id"`
-	// Reason 可选,给 server 日志用
-	Reason string `json:"reason,omitempty"`
 }

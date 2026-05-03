@@ -5,7 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"termind/internal/cmdbuf"
@@ -35,15 +39,17 @@ import (
 type dispatcher struct {
 	w io.Writer // 诊断渲染的目的地,通常就是 PTY 输出目的地 (os.Stdout)
 
-	conn *gateway.Conn   // 可能为 nil(离线)
+	conn *gateway.Conn // 可能为 nil(离线)
 	dc   *diagnose.Client
 
 	// 运行时命令环境,传给 server 做诊断
 	shellBin string
+	shellCmd *exec.Cmd
 
 	mu         sync.Mutex
 	activeCtx  context.Context
 	activeStop context.CancelFunc
+	activeR    *render.Renderer
 	closed     bool
 }
 
@@ -51,8 +57,8 @@ type dispatcher struct {
 // 调用者继续用它即可(所有 OnCmdDone 都 no-op)。
 //
 // stderr 用来打连接状态 warning,不影响正常输出。
-func newDispatcher(parentCtx context.Context, w io.Writer, stderr io.Writer, shellBin string) *dispatcher {
-	d := &dispatcher{w: w, shellBin: shellBin}
+func newDispatcher(parentCtx context.Context, w io.Writer, stderr io.Writer, shellBin string, shellCmd *exec.Cmd) *dispatcher {
+	d := &dispatcher{w: w, shellBin: shellBin, shellCmd: shellCmd}
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -65,8 +71,8 @@ func newDispatcher(parentCtx context.Context, w io.Writer, stderr io.Writer, she
 		return d
 	}
 	if cfg.ServerURL == "" || token == "" {
-		// 从未 pair 过,安静降级(不报警告,避免吓用户)
-		debuglog.Logf("dispatcher: offline (no pair)")
+		// 从未 init 过,安静降级(不报警告,避免吓用户)
+		debuglog.Logf("dispatcher: offline (not configured)")
 		return d
 	}
 
@@ -74,6 +80,23 @@ func newDispatcher(parentCtx context.Context, w io.Writer, stderr io.Writer, she
 	if err != nil {
 		fmt.Fprintf(stderr, "termind: load identity: %v (continuing offline)\n", err)
 		return d
+	}
+	role := cfg.Role
+	if role == "" {
+		role = pairing.DefaultRole
+	}
+	auth, err := pairing.LoadDeviceAuth(id.DeviceID(), role)
+	if err != nil {
+		fmt.Fprintf(stderr, "termind: load device auth: %v (continuing offline)\n", err)
+		return d
+	}
+	scopes := []string(nil)
+	if auth != nil {
+		token = auth.Token
+		scopes = auth.Scopes
+	}
+	if role == pairing.DefaultRole && len(scopes) == 0 {
+		scopes = pairing.DefaultScopes()
 	}
 
 	// 3 秒硬超时: 连不上就降级,不拖住 shell 启动
@@ -83,7 +106,14 @@ func newDispatcher(parentCtx context.Context, w io.Writer, stderr io.Writer, she
 		ServerURL:     cfg.ServerURL,
 		Identity:      id,
 		Token:         token,
+		Role:          role,
+		Scopes:        scopes,
 		ClientVersion: "termind-dev", // M4 里 cmd.Version 有,但 internal 不好反向依赖
+		OnDeviceToken: func(role, deviceToken string, scopes []string) {
+			if _, err := pairing.SaveDeviceAuth(id.DeviceID(), role, deviceToken, scopes); err != nil {
+				debuglog.Logf("dispatcher: save device auth: %v", err)
+			}
+		},
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "termind: gateway dial: %v (continuing offline)\n", err)
@@ -119,16 +149,21 @@ func (d *dispatcher) OnCmdDone(c cmdbuf.Command) {
 	d.cancelActive("new failed command")
 
 	ctx, stop := context.WithTimeout(context.Background(), 60*time.Second)
+	r := render.New(d.w)
+	r.StartAtLineStart(true)
+
 	d.mu.Lock()
 	if d.closed {
 		d.mu.Unlock()
+		r.Done()
 		stop()
 		return
 	}
 	d.activeCtx, d.activeStop = ctx, stop
+	d.activeR = r
 	d.mu.Unlock()
 
-	go d.run(ctx, c)
+	go d.run(ctx, c, r)
 }
 
 // OnShellEvent 接 osc133.Parser 的 onEvent 链路之后;新命令开始(C)时
@@ -168,17 +203,22 @@ func (d *dispatcher) cancelActive(reason string) {
 	d.mu.Lock()
 	stop := d.activeStop
 	d.activeStop = nil
+	r := d.activeR
+	d.activeR = nil
 	d.mu.Unlock()
 	if stop != nil {
 		debuglog.Logf("dispatcher: cancel active diagnose: %s", reason)
 		stop()
+	}
+	if r != nil {
+		r.Done()
 	}
 }
 
 // run 跑一次诊断: 构 Request → Start → renderer 流式消费 token → Done/Fail。
 //
 // 出错不 panic,只打 log 和 Fail 给用户看。
-func (d *dispatcher) run(ctx context.Context, c cmdbuf.Command) {
+func (d *dispatcher) run(ctx context.Context, c cmdbuf.Command, r *render.Renderer) {
 	// 组装 Request
 	cwd, _ := os.Getwd()
 	req := &diagnose.Request{
@@ -190,13 +230,13 @@ func (d *dispatcher) run(ctx context.Context, c cmdbuf.Command) {
 		Lang:       os.Getenv("LANG"),
 	}
 
-	r := render.New(d.w)
-	r.Start()
 	debuglog.Logf("diagnose: start exit=%d tail=%dB", c.Exit, len(c.Tail))
+	defer d.finishActive(ctx)
 
 	events, err := d.dc.Start(ctx, req)
 	if err != nil {
 		r.Fail(fmt.Sprintf("%v", err))
+		d.redrawPrompt()
 		debuglog.Logf("diagnose: start failed: %v", err)
 		return
 	}
@@ -204,6 +244,7 @@ func (d *dispatcher) run(ctx context.Context, c cmdbuf.Command) {
 	for ev := range events {
 		if ev.Error != "" {
 			r.Fail(ev.Error)
+			d.redrawPrompt()
 			debuglog.Logf("diagnose: server error: %s", ev.Error)
 			return
 		}
@@ -212,11 +253,40 @@ func (d *dispatcher) run(ctx context.Context, c cmdbuf.Command) {
 		}
 		if ev.Done {
 			r.Done()
+			d.redrawPrompt()
 			debuglog.Logf("diagnose: done")
 			return
 		}
 	}
 	// channel 被关但没收到 done: 被 cancel 或 conn 断
 	r.Done()
+	d.redrawPrompt()
 	debuglog.Logf("diagnose: stream closed without done")
+}
+
+func (d *dispatcher) finishActive(ctx context.Context) {
+	d.mu.Lock()
+	if d.activeCtx == ctx {
+		d.activeCtx = nil
+		d.activeStop = nil
+		d.activeR = nil
+	}
+	d.mu.Unlock()
+}
+
+func (d *dispatcher) redrawPrompt() {
+	if !isZshShell(d.shellBin) {
+		return
+	}
+	if d.shellCmd == nil || d.shellCmd.Process == nil {
+		return
+	}
+	if err := d.shellCmd.Process.Signal(syscall.SIGUSR1); err != nil {
+		debuglog.Logf("diagnose: redraw prompt signal failed: %v", err)
+	}
+}
+
+func isZshShell(shellBin string) bool {
+	name := filepath.Base(strings.TrimSpace(shellBin))
+	return name == "zsh" || name == "-zsh"
 }

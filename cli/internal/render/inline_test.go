@@ -6,66 +6,54 @@ import (
 	"testing"
 )
 
-func TestRenderer_StartThenTokensThenDone(t *testing.T) {
+func TestRenderer_StartThenTokensThenDoneRendersPanel(t *testing.T) {
 	var buf bytes.Buffer
 	r := New(&buf)
-	r.Start()
-	if _, err := r.Write("hello "); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := r.Write("world"); err != nil {
+	r.StartAtLineStart(true)
+	if _, err := r.Write("hello world"); err != nil {
 		t.Fatal(err)
 	}
 	r.Done()
 
-	out := buf.String()
-	// header 被写过
-	if !strings.Contains(out, headerText) {
+	out := stripANSI(buf.String())
+	if !strings.Contains(out, "termind is thinking") {
 		t.Fatalf("header not written: %q", out)
 	}
-	// token 被写过
+	if !strings.Contains(out, "termind insight") {
+		t.Fatalf("panel title missing: %q", out)
+	}
 	if !strings.Contains(out, "hello world") {
 		t.Fatalf("tokens missing: %q", out)
 	}
-	// 必须有 erase line 转换点
-	if !strings.Contains(out, ansiEraseLine) {
-		t.Fatalf("no erase line transition: %q", out)
-	}
-	// 最后必须有换行
-	if out[len(out)-1] != '\n' {
-		t.Fatalf("expected trailing \\n, got %q", out[len(out)-1:])
+	if !strings.Contains(out, "╭") || !strings.Contains(out, "╰") {
+		t.Fatalf("panel border missing: %q", out)
 	}
 }
 
-func TestRenderer_EmptyDeltaNoOp(t *testing.T) {
+func TestRenderer_StartAtLineStartAvoidsLeadingBlankLine(t *testing.T) {
 	var buf bytes.Buffer
 	r := New(&buf)
-	r.Start()
-	headerLen := buf.Len()
-	n, err := r.Write("")
-	if err != nil || n != 0 {
-		t.Fatalf("empty write: n=%d err=%v", n, err)
+	r.StartAtLineStart(true)
+	out := buf.String()
+	if strings.HasPrefix(out, "\n") || strings.HasPrefix(out, "\r\n") {
+		t.Fatalf("unexpected leading newline: %q", out)
 	}
-	if buf.Len() != headerLen {
-		t.Fatalf("empty write produced output: %q", buf.String()[headerLen:])
+	if !strings.Contains(out, headerText) {
+		t.Fatalf("header not written: %q", out)
 	}
-	r.Done()
 }
 
-func TestRenderer_DoneWithoutTokens_ErasesHeader(t *testing.T) {
+func TestRenderer_DoneWithoutTokensErasesHeader(t *testing.T) {
 	var buf bytes.Buffer
 	r := New(&buf)
 	r.Start()
 	r.Done()
 	out := buf.String()
-	// 有 header,但也应该有 erase line
 	if !strings.Contains(out, ansiEraseLine) {
 		t.Fatalf("erase missing: %q", out)
 	}
-	// 没有换行(我们是擦了 header,不额外加行)
-	if strings.HasSuffix(out, "\n") && !strings.HasSuffix(out, "\r\n") {
-		// 允许 \r\x1b[K... 我们不加 \n 是对的
-		t.Fatalf("should not add \\n on empty done: %q", out)
+	if strings.Contains(stripANSI(out), "termind insight") {
+		t.Fatalf("empty done should not render panel: %q", out)
 	}
 }
 
@@ -74,30 +62,12 @@ func TestRenderer_FailBeforeTokens(t *testing.T) {
 	r := New(&buf)
 	r.Start()
 	r.Fail("server 炸了")
-	out := buf.String()
+	out := stripANSI(buf.String())
 	if !strings.Contains(out, "server 炸了") {
 		t.Fatalf("fail msg missing: %q", out)
 	}
-	if !strings.Contains(out, ansiRed) {
-		t.Fatalf("red color missing: %q", out)
-	}
-	if !strings.Contains(out, ansiEraseLine) {
-		t.Fatalf("should erase header: %q", out)
-	}
-}
-
-func TestRenderer_FailAfterTokens(t *testing.T) {
-	var buf bytes.Buffer
-	r := New(&buf)
-	r.Start()
-	_, _ = r.Write("already said something")
-	r.Fail("boom")
-	out := buf.String()
-	if !strings.Contains(out, "already said something") {
-		t.Fatalf("token lost: %q", out)
-	}
-	if !strings.Contains(out, "boom") {
-		t.Fatalf("fail msg missing: %q", out)
+	if !strings.Contains(out, "termind diagnose") {
+		t.Fatalf("error panel title missing: %q", out)
 	}
 }
 
@@ -108,7 +78,6 @@ func TestRenderer_ClosedIsIdempotent(t *testing.T) {
 	_, _ = r.Write("x")
 	r.Done()
 	lenAfter := buf.Len()
-	// 再调用 Done/Write/Fail 都应 no-op
 	r.Done()
 	_, _ = r.Write("y")
 	r.Fail("ignored")
@@ -117,16 +86,33 @@ func TestRenderer_ClosedIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestRenderer_WriteWithoutStart(t *testing.T) {
+func TestRenderer_SanitizesMarkdownAndWraps(t *testing.T) {
 	var buf bytes.Buffer
 	r := New(&buf)
-	// 直接 Write,不 Start
-	_, err := r.Write("direct")
-	if err != nil {
-		t.Fatal(err)
-	}
+	r.StartAtLineStart(true)
+	_, _ = r.Write("**最可能原因**：命令 `cnmb` 不存在。\n```bash\nwhich cnmb 2>/dev/null || brew search cnmb\n```\n- 检查 alias。")
 	r.Done()
-	if !strings.Contains(buf.String(), "direct") {
-		t.Fatalf("direct write lost: %q", buf.String())
+	out := stripANSI(buf.String())
+	if strings.Contains(out, "**") || strings.Contains(out, "```") || strings.Contains(out, "`") {
+		t.Fatalf("markdown leaked: %q", out)
 	}
+	if !strings.Contains(out, "最可能原因：命令 cnmb 不存在。") {
+		t.Fatalf("clean text missing: %q", out)
+	}
+}
+
+func TestWrapLinesRespectsWidth(t *testing.T) {
+	lines := wrapLines("abcdefghijklmnopqrstuvwxyz", 8)
+	if len(lines) < 2 {
+		t.Fatalf("expected wrapping: %v", lines)
+	}
+	for _, line := range lines {
+		if displayWidth(line) > 8 {
+			t.Fatalf("line too wide: %q", line)
+		}
+	}
+}
+
+func stripANSI(s string) string {
+	return ansiRE.ReplaceAllString(s, "")
 }
