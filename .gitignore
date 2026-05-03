@@ -4,6 +4,7 @@ cli/termind
 # Runtime / debug logs
 cli/debug.log
 /debug.log
+.omx/
 
 # macOS
 .DS_Store
