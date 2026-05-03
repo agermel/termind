@@ -504,15 +504,15 @@ func connectAuthFor(opts DialOptions) connectAuth {
 		return connectAuth{BootstrapToken: opts.BootstrapToken}
 	}
 	if opts.SharedToken != "" {
-		return connectAuth{Token: opts.SharedToken}
+		return connectAuth{Token: opts.SharedToken, DeviceToken: opts.Token}
 	}
 	if opts.Password != "" {
-		return connectAuth{Password: opts.Password}
+		return connectAuth{Password: opts.Password, DeviceToken: opts.Token}
 	}
 	if opts.Token == "" {
 		return connectAuth{}
 	}
-	return connectAuth{Token: opts.Token, DeviceToken: opts.Token}
+	return connectAuth{DeviceToken: opts.Token}
 }
 
 func signatureToken(opts DialOptions) string {
@@ -522,7 +522,10 @@ func signatureToken(opts DialOptions) string {
 	if opts.SharedToken != "" {
 		return opts.SharedToken
 	}
-	return opts.Token
+	if opts.Token != "" {
+		return opts.Token
+	}
+	return ""
 }
 
 func defaultString(v, fallback string) string {

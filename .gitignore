@@ -5,6 +5,7 @@ cli/termind
 cli/debug.log
 /debug.log
 .omx/
+.codex-local/
 
 # macOS
 .DS_Store

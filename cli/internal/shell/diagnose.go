@@ -144,6 +144,8 @@ func (d *dispatcher) OnCmdDone(c cmdbuf.Command) {
 	if d.shouldSkip(c.Exit) {
 		return
 	}
+	req := d.requestFromCommand(c)
+	d.dispatchAlert(req)
 
 	// 取消上一条进行中的诊断;一次只留一条
 	d.cancelActive("new failed command")
@@ -163,7 +165,7 @@ func (d *dispatcher) OnCmdDone(c cmdbuf.Command) {
 	d.activeR = r
 	d.mu.Unlock()
 
-	go d.run(ctx, c, r)
+	go d.run(ctx, req, r)
 }
 
 // OnShellEvent 接 osc133.Parser 的 onEvent 链路之后;新命令开始(C)时
@@ -218,19 +220,36 @@ func (d *dispatcher) cancelActive(reason string) {
 // run 跑一次诊断: 构 Request → Start → renderer 流式消费 token → Done/Fail。
 //
 // 出错不 panic,只打 log 和 Fail 给用户看。
-func (d *dispatcher) run(ctx context.Context, c cmdbuf.Command, r *render.Renderer) {
-	// 组装 Request
+func (d *dispatcher) requestFromCommand(c cmdbuf.Command) *diagnose.Request {
 	cwd, _ := os.Getwd()
-	req := &diagnose.Request{
-		Command:    "", // M3 cmdbuf 当前没采集命令本身,等 M3 增强后填;先留空
+	return &diagnose.Request{
+		Command:    c.Text,
 		ExitCode:   c.Exit,
 		OutputTail: string(c.Tail),
 		Shell:      d.shellBin,
 		Cwd:        cwd,
 		Lang:       os.Getenv("LANG"),
 	}
+}
 
-	debuglog.Logf("diagnose: start exit=%d tail=%dB", c.Exit, len(c.Tail))
+func (d *dispatcher) dispatchAlert(req *diagnose.Request) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	go func() {
+		defer cancel()
+		debuglog.Logf("alert: start command=%q exit=%d tail=%dB", req.Command, req.ExitCode, len(req.OutputTail))
+		if err := d.dc.Alert(ctx, req); err != nil {
+			debuglog.Logf("alert: failed: %v", err)
+			return
+		}
+		debuglog.Logf("alert: submitted")
+	}()
+}
+
+// run 跑一次诊断: 构 Request → Start → renderer 流式消费 token → Done/Fail。
+//
+// 出错不 panic,只打 log 和 Fail 给用户看。
+func (d *dispatcher) run(ctx context.Context, req *diagnose.Request, r *render.Renderer) {
+	debuglog.Logf("diagnose: start command=%q exit=%d tail=%dB", req.Command, req.ExitCode, len(req.OutputTail))
 	defer d.finishActive(ctx)
 
 	events, err := d.dc.Start(ctx, req)

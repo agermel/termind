@@ -61,6 +61,8 @@ func (k EventKind) String() string {
 // Event 是 parser 识别到的一次 OSC 133 暗号。
 type Event struct {
 	Kind EventKind
+	// Command 仅在 Kind == EventCommandStart 时可能存在。
+	Command string
 	// Exit 仅在 Kind == EventCommandEnd 时有效
 	Exit int
 }
@@ -267,7 +269,7 @@ func parse133(payload []byte) (Event, bool) {
 	case "B":
 		return Event{Kind: EventPromptEnd}, true
 	case "C":
-		return Event{Kind: EventCommandStart}, true
+		return Event{Kind: EventCommandStart, Command: arg}, true
 	case "D":
 		ev := Event{Kind: EventCommandEnd}
 		if arg != "" {

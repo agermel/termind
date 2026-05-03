@@ -5,7 +5,7 @@
 #
 # 在每条命令开始/结束时吐 OSC 133 暗号,让 termind 识别命令边界:
 #   A          prompt 开始
-#   C          命令开始执行
+#   C;<cmd>    命令开始执行(带原始命令文本)
 #   D;<exit>   命令结束(带退出码)
 #
 # B(prompt 结束/输入开始)M2 不注入 PS1 —— 后续 M5 prompt 抑制需要时再加。
@@ -33,7 +33,8 @@ __termind_precmd() {
 
 # preexec:命令执行前触发(用户已按回车)
 __termind_preexec() {
-    printf '\e]133;C\a'
+    local cmd=${1//$'\a'/}
+    printf '\e]133;C;%s\a' "$cmd"
 }
 
 TRAPUSR1() {

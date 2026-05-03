@@ -1,0 +1,25 @@
+{
+  "id": "termind",
+  "name": "Termind",
+  "version": "0.1.0",
+  "description": "Safe Termind terminal intelligence tools for OpenClaw orchestration.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
+  "contracts": {
+    "tools": [
+      "termind_event_redact",
+      "termind_fingerprint_compute",
+      "termind_failure_classify",
+      "termind_lark_card_build",
+      "termind_report_template_build"
+    ]
+  },
+  "skills": [
+    "./skills/termind-lark-alert",
+    "./skills/termind-knowledge-rag",
+    "./skills/termind-incident-report"
+  ]
+}

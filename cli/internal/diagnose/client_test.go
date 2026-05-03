@@ -20,6 +20,7 @@ type mockDiagnoseServer struct {
 	waitStatus    string
 	waitError     string
 	seenMethods   []string
+	agentRequests []agentRequest
 }
 
 func (m *mockDiagnoseServer) handler(t *testing.T) http.HandlerFunc {
@@ -87,12 +88,7 @@ func (m *mockDiagnoseServer) handler(t *testing.T) http.HandlerFunc {
 			case MethodAgent:
 				var p agentRequest
 				_ = json.Unmarshal(req.Params, &p)
-				if p.SessionKey != defaultSessionKey {
-					t.Errorf("sessionKey=%q, want %q", p.SessionKey, defaultSessionKey)
-				}
-				if !strings.Contains(p.Message, "退出码: 1") {
-					t.Errorf("prompt missing exit code: %q", p.Message)
-				}
+				m.agentRequests = append(m.agentRequests, p)
 				writeResponse(ctx, ws, req.ID, map[string]any{
 					"runId":  p.IDempotencyKey,
 					"status": "accepted",
@@ -202,9 +198,71 @@ func TestDiagnose_UsesOperatorAgentFlow(t *testing.T) {
 	if got.String() != "建议先检查路径是否存在。" {
 		t.Fatalf("got %q", got.String())
 	}
+	if len(ms.agentRequests) != 1 {
+		t.Fatalf("agentRequests=%d, want 1", len(ms.agentRequests))
+	}
+	if got := ms.agentRequests[0].SessionKey; got != defaultSessionKey {
+		t.Errorf("sessionKey=%q, want %q", got, defaultSessionKey)
+	}
+	if !strings.Contains(ms.agentRequests[0].Message, "退出码: 1") {
+		t.Errorf("prompt missing exit code: %q", ms.agentRequests[0].Message)
+	}
 	want := []string{MethodAgent, MethodAgentWait, MethodSessionsGet}
 	if strings.Join(ms.seenMethods, ",") != strings.Join(want, ",") {
 		t.Fatalf("methods=%v, want %v", ms.seenMethods, want)
+	}
+}
+
+func TestDiagnose_AlertSubmitsTermindLarkSkillPrompt(t *testing.T) {
+	t.Setenv("TERMIND_LARK_CHAT_ID", "oc_test")
+	ms := &mockDiagnoseServer{assistantText: "ignored"}
+	srv := httptest.NewServer(ms.handler(t))
+	defer srv.Close()
+
+	conn := dialTestConn(t, srv.URL)
+	defer conn.Close()
+
+	dc := NewClient(conn)
+	err := dc.Alert(context.Background(), &Request{
+		Command:    "go run ./cmd/grade serve",
+		ExitCode:   1,
+		OutputTail: "panic: runtime error: invalid memory address\nAuthorization: Bearer secret-token",
+		Shell:      "/bin/zsh",
+		Cwd:        "/repo",
+		Lang:       "zh_CN.UTF-8",
+	})
+	if err != nil {
+		t.Fatalf("Alert: %v", err)
+	}
+
+	if len(ms.agentRequests) != 1 {
+		t.Fatalf("agentRequests=%d, want 1", len(ms.agentRequests))
+	}
+	req := ms.agentRequests[0]
+	if req.SessionKey != alertSessionKey {
+		t.Fatalf("sessionKey=%q, want %q", req.SessionKey, alertSessionKey)
+	}
+	if req.Deliver {
+		t.Fatal("alert should hand off to OpenClaw orchestration without direct delivery")
+	}
+	for _, want := range []string{
+		"Use the termind-lark-alert skill.",
+		"OpenClaw's `message` tool",
+		"termind_lark_card_build",
+		"channel: feishu",
+		"oc_test",
+		"go run ./cmd/grade serve",
+		"panic: runtime error: invalid memory address",
+	} {
+		if !strings.Contains(req.Message, want) {
+			t.Fatalf("alert prompt missing %q:\n%s", want, req.Message)
+		}
+	}
+	if strings.Contains(req.Message, "Use lark-cli as the only") {
+		t.Fatalf("alert prompt still points at lark-cli:\n%s", req.Message)
+	}
+	if strings.Contains(req.Message, "termind_lark_cli_send_command_build") {
+		t.Fatalf("alert prompt still points at legacy lark-cli helper:\n%s", req.Message)
 	}
 }
 

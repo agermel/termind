@@ -144,8 +144,8 @@ func TestDial_ConnectOK(t *testing.T) {
 	ms := &mockServer{
 		challengeNonce: "nonce-xyz",
 		onConnect: func(p connectParams) *frameError {
-			if p.Auth.Token != "tok" || p.Auth.DeviceToken != "tok" {
-				return &frameError{Code: "BAD_AUTH", Message: "missing token"}
+			if p.Auth.Token != "" || p.Auth.DeviceToken != "tok" {
+				return &frameError{Code: "BAD_AUTH", Message: "bad device token auth"}
 			}
 			if p.Device == nil || p.Device.ID != id.DeviceID() || p.Device.Signature == "" {
 				return &frameError{Code: "BAD_DEVICE", Message: "missing device"}
@@ -184,6 +184,48 @@ func TestDial_ConnectOK(t *testing.T) {
 	if !reflect.DeepEqual(savedScopes, pairing.DefaultScopes()) {
 		t.Fatalf("scopes=%v", savedScopes)
 	}
+}
+
+func TestDial_SharedTokenAndDeviceToken(t *testing.T) {
+	id := testIdentity(t)
+	ms := &mockServer{
+		challengeNonce: "nonce-xyz",
+		onConnect: func(p connectParams) *frameError {
+			if p.Auth.Token != "gateway-shared" || p.Auth.DeviceToken != "device-token" {
+				return &frameError{Code: "BAD_AUTH", Message: "bad gateway/device token auth"}
+			}
+			if err := pairing.VerifyDeviceDescriptor(id.PublicKey(), p.Device, pairing.DeviceAuthInput{
+				Identity:     id,
+				Token:        "gateway-shared",
+				ClientID:     p.Client.ID,
+				ClientMode:   p.Client.Mode,
+				Role:         p.Role,
+				Scopes:       p.Scopes,
+				Platform:     p.Client.Platform,
+				DeviceFamily: p.Client.DeviceFamily,
+			}); err != nil {
+				return &frameError{Code: "BAD_SIGNATURE", Message: err.Error()}
+			}
+			return nil
+		},
+	}
+	srv := httptest.NewServer(ms.handler(t))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := Dial(ctx, DialOptions{
+		ServerURL:     wsURL(srv),
+		Identity:      id,
+		Token:         "device-token",
+		SharedToken:   "gateway-shared",
+		ClientVersion: "test",
+	})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
 }
 
 func TestDial_BootstrapConnectOK(t *testing.T) {

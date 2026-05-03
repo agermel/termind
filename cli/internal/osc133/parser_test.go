@@ -28,7 +28,7 @@ func TestParser_PassThroughNormal(t *testing.T) {
 
 func TestParser_CommandStartEnd(t *testing.T) {
 	p, out, events := newTestParser()
-	input := []byte("\x1b]133;C\x07hello\n\x1b]133;D;0\x07")
+	input := []byte("\x1b]133;C;echo hello\x07hello\n\x1b]133;D;0\x07")
 	if _, err := p.Write(input); err != nil {
 		t.Fatal(err)
 	}
@@ -40,6 +40,9 @@ func TestParser_CommandStartEnd(t *testing.T) {
 	}
 	if (*events)[0].Kind != EventCommandStart {
 		t.Errorf("event[0] = %v, want CommandStart", (*events)[0])
+	}
+	if (*events)[0].Command != "echo hello" {
+		t.Errorf("command = %q, want echo hello", (*events)[0].Command)
 	}
 	if (*events)[1].Kind != EventCommandEnd || (*events)[1].Exit != 0 {
 		t.Errorf("event[1] = %v, want CommandEnd exit=0", (*events)[1])

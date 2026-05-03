@@ -27,6 +27,9 @@ type Command struct {
 	StartedAt time.Time
 	EndedAt   time.Time
 
+	// Text 是用户实际输入的命令文本,来自 OSC 133 C;<cmd>。
+	Text string
+
 	// Exit 来自 OSC 133;D;<exit> 暗号
 	Exit int
 
@@ -54,6 +57,7 @@ type Buffer struct {
 
 	inCommand bool
 	startedAt time.Time
+	command   string
 	tail      *ring
 }
 
@@ -76,6 +80,7 @@ func (b *Buffer) OnEvent(ev osc133.Event) {
 	case osc133.EventCommandStart:
 		b.inCommand = true
 		b.startedAt = now
+		b.command = ev.Command
 		b.tail.reset()
 	case osc133.EventCommandEnd:
 		if !b.inCommand {
@@ -86,10 +91,12 @@ func (b *Buffer) OnEvent(ev osc133.Event) {
 		c := Command{
 			StartedAt: b.startedAt,
 			EndedAt:   now,
+			Text:      b.command,
 			Exit:      ev.Exit,
 			Tail:      b.tail.snapshot(),
 		}
 		b.inCommand = false
+		b.command = ""
 		b.tail.reset()
 		if b.onComplete != nil {
 			b.onComplete(c)

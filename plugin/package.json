@@ -1,0 +1,32 @@
+{
+  "name": "termind-openclaw-plugin",
+  "version": "0.1.0",
+  "description": "Safe OpenClaw tools and skills for Termind terminal intelligence workflows.",
+  "type": "module",
+  "main": "src/index.js",
+  "openclaw": {
+    "extensions": [
+      "./src/index.js"
+    ]
+  },
+  "files": [
+    "openclaw.plugin.json",
+    "src",
+    "skills"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": [
+    "openclaw",
+    "termind",
+    "terminal",
+    "incident",
+    "lark",
+    "feishu"
+  ],
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20"
+  }
+}

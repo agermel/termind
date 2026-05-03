@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -43,6 +44,30 @@ func (c *Client) Start(ctx context.Context, req *Request) (<-chan TokenEvent, er
 	out := make(chan TokenEvent, 1)
 	go c.run(ctx, req, out)
 	return out, nil
+}
+
+// Alert 把失败事件交给 OpenClaw 的 termind-lark-alert skill 处理。
+//
+// 这里不等待 agent 完成,也不在 Termind 本地发送飞书消息。Termind 只负责把
+// 结构化失败事件投递给 OpenClaw,后续卡片构建/飞书发送由 OpenClaw 编排。
+func (c *Client) Alert(ctx context.Context, req *Request) error {
+	if c.conn == nil {
+		return errors.New("diagnose: nil gateway conn")
+	}
+	runID := "termind-alert-" + randomHex(16)
+	agentReq := agentRequest{
+		Message:        buildAlertPrompt(req),
+		SessionKey:     alertSessionKey,
+		Deliver:        false,
+		Thinking:       "low",
+		IDempotencyKey: runID,
+		Label:          alertLabel,
+	}
+	var accepted agentResponse
+	if err := c.conn.Call(ctx, MethodAgent, agentReq, &accepted); err != nil {
+		return fmt.Errorf("agent: %w", err)
+	}
+	return nil
 }
 
 func (c *Client) run(ctx context.Context, req *Request, out chan<- TokenEvent) {
@@ -183,6 +208,72 @@ func buildPrompt(req *Request) string {
 		b.WriteString("\n```\n")
 	}
 	return b.String()
+}
+
+func buildAlertPrompt(req *Request) string {
+	event := failureEventFromRequest(req)
+	b, _ := json.MarshalIndent(event, "", "  ")
+
+	var out strings.Builder
+	out.WriteString("Use the termind-lark-alert skill.\n\n")
+	out.WriteString("Termind detected a failed terminal command. Treat the following JSON as the source event.\n")
+	out.WriteString("Call the Termind plugin tools in this order:\n")
+	out.WriteString("1. termind_event_redact\n")
+	out.WriteString("2. termind_fingerprint_compute\n")
+	out.WriteString("3. termind_failure_classify\n")
+	out.WriteString("4. termind_lark_card_build\n\n")
+	out.WriteString("Then send the returned card with OpenClaw's `message` tool, using exactly:\n")
+	out.WriteString("- action: send\n")
+	out.WriteString("- channel: feishu\n")
+	out.WriteString("- target: the event.larkChatId value\n")
+	out.WriteString("- card: the `card` object returned by termind_lark_card_build\n\n")
+	out.WriteString("Do not use feishu_chat for sending; that tool is for chat/member info.\n")
+	out.WriteString("Do not use lark-cli for this flow. If the `message` tool is unavailable, say `tools.alsoAllow must include message` and do not claim delivery.\n")
+	out.WriteString("Only claim the card was sent after the `message` tool returns ok.\n\n")
+	out.WriteString("Failure event:\n")
+	out.WriteString("```json\n")
+	out.Write(b)
+	out.WriteString("\n```\n")
+	return out.String()
+}
+
+func failureEventFromRequest(req *Request) map[string]any {
+	event := map[string]any{
+		"summary":     summarizeFailure(req),
+		"command":     strings.TrimSpace(req.Command),
+		"severity":    "warning",
+		"exitCode":    req.ExitCode,
+		"cwd":         req.Cwd,
+		"environment": req.Lang,
+		"shell":       req.Shell,
+		"tail":        trimForPrompt(req.OutputTail, 4000),
+	}
+	if chatID := strings.TrimSpace(os.Getenv("TERMIND_LARK_CHAT_ID")); chatID != "" {
+		event["larkChatId"] = chatID
+	}
+	for k, v := range event {
+		if s, ok := v.(string); ok && strings.TrimSpace(s) == "" {
+			delete(event, k)
+		}
+	}
+	return event
+}
+
+func summarizeFailure(req *Request) string {
+	tail := strings.TrimSpace(req.OutputTail)
+	if tail != "" {
+		lines := strings.Split(tail, "\n")
+		for i := len(lines) - 1; i >= 0; i-- {
+			line := strings.TrimSpace(lines[i])
+			if line != "" {
+				return line
+			}
+		}
+	}
+	if strings.TrimSpace(req.Command) != "" {
+		return fmt.Sprintf("command failed: %s", strings.TrimSpace(req.Command))
+	}
+	return fmt.Sprintf("command failed with exit code %d", req.ExitCode)
 }
 
 func cleanTerminalText(s string) string {

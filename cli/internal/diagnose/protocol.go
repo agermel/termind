@@ -25,7 +25,9 @@ const (
 	MethodSessionsGet = "sessions.get"
 
 	defaultSessionKey = "agent:main:termind"
+	alertSessionKey   = "agent:main:termind-lark-alert"
 	defaultLabel      = "termind"
+	alertLabel        = "termind-lark-alert"
 )
 
 // Request 是一次 termind shell 诊断的输入。
