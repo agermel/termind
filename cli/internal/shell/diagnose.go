@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -42,6 +43,8 @@ type dispatcher struct {
 	conn *gateway.Conn // 可能为 nil(离线)
 	dc   *diagnose.Client
 
+	connectMu sync.Mutex
+
 	// 运行时命令环境,传给 server 做诊断
 	shellBin string
 	shellCmd *exec.Cmd
@@ -53,6 +56,11 @@ type dispatcher struct {
 	closed     bool
 }
 
+var (
+	errGatewayNotConfigured = errors.New("gateway not configured")
+	errDispatcherClosed     = errors.New("dispatcher closed")
+)
+
 // newDispatcher 尝试连接 gateway;失败或未配对时返回一个"离线"dispatcher,
 // 调用者继续用它即可(所有 OnCmdDone 都 no-op)。
 //
@@ -60,26 +68,37 @@ type dispatcher struct {
 func newDispatcher(parentCtx context.Context, w io.Writer, stderr io.Writer, shellBin string, shellCmd *exec.Cmd) *dispatcher {
 	d := &dispatcher{w: w, shellBin: shellBin, shellCmd: shellCmd}
 
+	conn, dc, serverURL, err := connectDiagnoseClient(parentCtx)
+	if err != nil {
+		if errors.Is(err, errGatewayNotConfigured) {
+			debuglog.Logf("dispatcher: offline (not configured)")
+			return d
+		}
+		fmt.Fprintf(stderr, "termind: gateway dial: %v (continuing offline)\n", err)
+		return d
+	}
+	d.conn = conn
+	d.dc = dc
+	fmt.Fprintf(stderr, "termind: gateway connected (%s)\n", serverURL)
+	return d
+}
+
+func connectDiagnoseClient(parentCtx context.Context) (*gateway.Conn, *diagnose.Client, string, error) {
 	cfg, err := config.Load()
 	if err != nil {
-		fmt.Fprintf(stderr, "termind: config load: %v (continuing offline)\n", err)
-		return d
+		return nil, nil, "", fmt.Errorf("config load: %w", err)
 	}
 	token, err := pairing.LoadToken()
 	if err != nil {
-		fmt.Fprintf(stderr, "termind: load token: %v (continuing offline)\n", err)
-		return d
+		return nil, nil, "", fmt.Errorf("load token: %w", err)
 	}
 	if cfg.ServerURL == "" || token == "" {
-		// 从未 init 过,安静降级(不报警告,避免吓用户)
-		debuglog.Logf("dispatcher: offline (not configured)")
-		return d
+		return nil, nil, "", errGatewayNotConfigured
 	}
 
 	id, err := identity.LoadOrCreate()
 	if err != nil {
-		fmt.Fprintf(stderr, "termind: load identity: %v (continuing offline)\n", err)
-		return d
+		return nil, nil, "", fmt.Errorf("load identity: %w", err)
 	}
 	role := cfg.Role
 	if role == "" {
@@ -87,8 +106,7 @@ func newDispatcher(parentCtx context.Context, w io.Writer, stderr io.Writer, she
 	}
 	auth, err := pairing.LoadDeviceAuth(id.DeviceID(), role)
 	if err != nil {
-		fmt.Fprintf(stderr, "termind: load device auth: %v (continuing offline)\n", err)
-		return d
+		return nil, nil, "", fmt.Errorf("load device auth: %w", err)
 	}
 	scopes := []string(nil)
 	if auth != nil {
@@ -116,13 +134,9 @@ func newDispatcher(parentCtx context.Context, w io.Writer, stderr io.Writer, she
 		},
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "termind: gateway dial: %v (continuing offline)\n", err)
-		return d
+		return nil, nil, "", err
 	}
-	d.conn = conn
-	d.dc = diagnose.NewClient(conn)
-	fmt.Fprintf(stderr, "termind: gateway connected (%s)\n", cfg.ServerURL)
-	return d
+	return conn, diagnose.NewClient(conn), cfg.ServerURL, nil
 }
 
 // enabled 报告本 dispatcher 是否能真正跑诊断。
@@ -138,19 +152,32 @@ func (d *dispatcher) enabled() bool {
 //   - exit == 143: SIGTERM
 //   - exit == 148: SIGTSTP (Ctrl-Z)
 func (d *dispatcher) OnCmdDone(c cmdbuf.Command) {
-	if !d.enabled() {
+	if d == nil {
 		return
 	}
 	if d.shouldSkip(c.Exit) {
 		return
 	}
 	req := d.requestFromCommand(c)
-	d.dispatchAlert(req)
+	ctx, stop := context.WithTimeout(context.Background(), 60*time.Second)
+	dc, err := d.ensureConnected(ctx)
+	if err != nil {
+		stop()
+		if errors.Is(err, errGatewayNotConfigured) || errors.Is(err, errDispatcherClosed) {
+			return
+		}
+		r := render.New(d.w)
+		r.StartAtLineStart(true)
+		r.Fail(fmt.Sprintf("%v", err))
+		d.redrawPrompt()
+		debuglog.Logf("diagnose: reconnect failed: %v", err)
+		return
+	}
+	d.dispatchAlert(dc, req)
 
 	// 取消上一条进行中的诊断;一次只留一条
 	d.cancelActive("new failed command")
 
-	ctx, stop := context.WithTimeout(context.Background(), 60*time.Second)
 	r := render.New(d.w)
 	r.StartAtLineStart(true)
 
@@ -165,7 +192,7 @@ func (d *dispatcher) OnCmdDone(c cmdbuf.Command) {
 	d.activeR = r
 	d.mu.Unlock()
 
-	go d.run(ctx, req, r)
+	go d.run(ctx, dc, req, r)
 }
 
 // OnShellEvent 接 osc133.Parser 的 onEvent 链路之后;新命令开始(C)时
@@ -182,12 +209,15 @@ func (d *dispatcher) Close() {
 	d.closed = true
 	stop := d.activeStop
 	d.activeStop = nil
+	conn := d.conn
+	d.conn = nil
+	d.dc = nil
 	d.mu.Unlock()
 	if stop != nil {
 		stop()
 	}
-	if d.conn != nil {
-		_ = d.conn.Close()
+	if conn != nil {
+		_ = conn.Close()
 	}
 }
 
@@ -199,6 +229,70 @@ func (d *dispatcher) shouldSkip(exit int) bool {
 		return true
 	}
 	return false
+}
+
+func (d *dispatcher) currentClientIfAlive() (*diagnose.Client, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed || d.conn == nil || d.dc == nil {
+		return nil, false
+	}
+	select {
+	case <-d.conn.Done():
+		return nil, false
+	default:
+		return d.dc, true
+	}
+}
+
+func (d *dispatcher) ensureConnected(ctx context.Context) (*diagnose.Client, error) {
+	if dc, ok := d.currentClientIfAlive(); ok {
+		return dc, nil
+	}
+
+	d.connectMu.Lock()
+	defer d.connectMu.Unlock()
+
+	if dc, ok := d.currentClientIfAlive(); ok {
+		return dc, nil
+	}
+
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, errDispatcherClosed
+	}
+	oldConn := d.conn
+	if oldConn != nil {
+		debuglog.Logf("dispatcher: gateway disconnected: %v", oldConn.Err())
+	}
+	d.mu.Unlock()
+
+	conn, dc, serverURL, err := connectDiagnoseClient(ctx)
+	if err != nil {
+		if errors.Is(err, errGatewayNotConfigured) {
+			debuglog.Logf("dispatcher: offline (not configured)")
+			return nil, err
+		}
+		return nil, fmt.Errorf("OpenClaw 连接断了，自动重连失败: %w", err)
+	}
+
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		_ = conn.Close()
+		return nil, errDispatcherClosed
+	}
+	oldConn = d.conn
+	d.conn = conn
+	d.dc = dc
+	d.mu.Unlock()
+
+	if oldConn != nil && oldConn != conn {
+		_ = oldConn.Close()
+	}
+	debuglog.Logf("dispatcher: gateway reconnected (%s)", serverURL)
+	return dc, nil
 }
 
 func (d *dispatcher) cancelActive(reason string) {
@@ -232,12 +326,15 @@ func (d *dispatcher) requestFromCommand(c cmdbuf.Command) *diagnose.Request {
 	}
 }
 
-func (d *dispatcher) dispatchAlert(req *diagnose.Request) {
+func (d *dispatcher) dispatchAlert(dc *diagnose.Client, req *diagnose.Request) {
+	if dc == nil {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	go func() {
 		defer cancel()
 		debuglog.Logf("alert: start command=%q exit=%d tail=%dB", req.Command, req.ExitCode, len(req.OutputTail))
-		if err := d.dc.Alert(ctx, req); err != nil {
+		if err := dc.Alert(ctx, req); err != nil {
 			debuglog.Logf("alert: failed: %v", err)
 			return
 		}
@@ -248,11 +345,11 @@ func (d *dispatcher) dispatchAlert(req *diagnose.Request) {
 // run 跑一次诊断: 构 Request → Start → renderer 流式消费 token → Done/Fail。
 //
 // 出错不 panic,只打 log 和 Fail 给用户看。
-func (d *dispatcher) run(ctx context.Context, req *diagnose.Request, r *render.Renderer) {
+func (d *dispatcher) run(ctx context.Context, dc *diagnose.Client, req *diagnose.Request, r *render.Renderer) {
 	debuglog.Logf("diagnose: start command=%q exit=%d tail=%dB", req.Command, req.ExitCode, len(req.OutputTail))
 	defer d.finishActive(ctx)
 
-	events, err := d.dc.Start(ctx, req)
+	events, err := dc.Start(ctx, req)
 	if err != nil {
 		r.Fail(fmt.Sprintf("%v", err))
 		d.redrawPrompt()
