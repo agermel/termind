@@ -14,7 +14,7 @@ card='{
     "template": "orange",
     "title": {
       "tag": "plain_text",
-      "content": "ccnu-copilot · 新错误已立案 · a3f9c2d1"
+      "content": "termind · 新错误已立案 · a3f9c2d1"
     }
   },
   "elements": [

@@ -1,15 +1,15 @@
 const severityMeta = {
   info: {
     tag: "green",
-    title: "ccnu-copilot · 历史同款"
+    title: "termind · 历史同款"
   },
   warning: {
     tag: "orange",
-    title: "ccnu-copilot · 新错误已立案"
+    title: "termind · 新错误已立案"
   },
   incident: {
     tag: "red",
-    title: "ccnu-copilot · 指纹异常扩散"
+    title: "termind · 指纹异常扩散"
   }
 };
 
