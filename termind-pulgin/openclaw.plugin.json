@@ -1,0 +1,27 @@
+{
+  "id": "termind",
+  "name": "Termind",
+  "description": "Safe Termind terminal intelligence — pure data-transform tools for failure event redaction, fingerprinting, classification, Lark card building, and incident report generation.",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
+  "contracts": {
+    "tools": [
+      "termind_event_redact",
+      "termind_fingerprint_compute",
+      "termind_failure_classify",
+      "termind_lark_card_build",
+      "termind_report_template_build"
+    ]
+  },
+  "skills": [
+    "./skills/termind-lark-alert",
+    "./skills/termind-knowledge-rag",
+    "./skills/termind-incident-report"
+  ]
+}
