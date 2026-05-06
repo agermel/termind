@@ -3,7 +3,10 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { buildIncidentCard } from "./lib/card.js";
 import { classifyFailure } from "./lib/classify.js";
 import { computeFingerprint } from "./lib/fingerprint.js";
+import { incidentRegistryTool, incidentRegistryUpsertTool } from "./lib/registry.js";
 import { larkCliDiscoverTool } from "./lib/lark-cli-discover.js";
+import { larkKnowledgeSearchTool } from "./lib/lark-knowledge-search.js";
+import { ownerResolveTool } from "./lib/owner-resolve.js";
 import { buildLarkCliCommands, larkTargetsForEvent } from "./lib/lark-cli.js";
 import {
   larkCliAuthLoginTool,
@@ -60,11 +63,97 @@ const failureEventSchema = {
         }
       }
     },
+    // CLI 端通过 forwarding 字段把 lark-cli 多 identity 路由表传过来,
+    // buildLarkCliCommands 优先消费这两个字段, normalize 不能把它们丢掉.
+    larkForwardingIdentities: {
+      type: "object",
+      additionalProperties: {
+        type: "object",
+        additionalProperties: true,
+        properties: {
+          id: { type: "string" },
+          kind: { type: "string", enum: ["bot", "user"] },
+          label: { type: "string" },
+          appId: { type: "string" },
+          userOpenId: { type: "string" },
+          profile: { type: "string" },
+          larkCliConfigDir: { type: "string" },
+          enabled: { type: "boolean" },
+          source: { type: "string" },
+          slot: { type: "string" }
+        }
+      }
+    },
+    larkForwardingRoutes: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: true,
+        properties: {
+          identityId: { type: "string" },
+          enabled: { type: "boolean" },
+          target: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              type: { type: "string", enum: ["chat", "user", "bot"] },
+              id: { type: "string" },
+              label: { type: "string" }
+            }
+          }
+        }
+      }
+    },
     stackTop: { type: "array", items: { type: "string" } },
     reportUrl: { type: "string" },
     occurrences: { type: "number" },
     affectedUsers: { type: "number" },
-    branchKind: { type: "string" }
+    branchKind: { type: "string" },
+    // Fields produced by termind_incident_registry_query and merged back
+    // into the failure event before classify/card-build. The card reads
+    // these directly to render history/escalation blocks.
+    registryBranch: {
+      type: "string",
+      enum: ["new_case", "recurrence", "escalation_candidate"]
+    },
+    windowOccurrences: { type: "number" },
+    windowMinutes: { type: "number" },
+    firstSeen: { type: "string" },
+    lastSeen: { type: "string" },
+    // Owner produced by termind_owner_resolve (git author -> Lark open_id).
+    // Card uses { openId, label, confidence } to decide whether to @-mention.
+    owner: {
+      type: "object",
+      additionalProperties: true,
+      properties: {
+        kind: { type: "string" },
+        openId: { type: "string" },
+        label: { type: "string" },
+        email: { type: "string" },
+        source: { type: "string" },
+        confidence: { type: "string" }
+      }
+    },
+    // Knowledge hits produced by termind_lark_knowledge_search. Used by card
+    // and report builders to render reference links.
+    knowledgeHits: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: true,
+        properties: {
+          token: { type: "string" },
+          type: { type: "string" },
+          title: { type: "string" },
+          url: { type: "string" },
+          ownerOpenId: { type: "string" },
+          ownerName: { type: "string" },
+          lastModified: { type: "string" },
+          snippet: { type: "string" },
+          score: { type: "number" }
+        }
+      }
+    }
   }
 };
 
@@ -121,6 +210,157 @@ export default definePluginEntry({
       async execute(_callId, params) {
         const event = redactFailureEvent(normalizeFailureEvent(params, { requireFingerprint: false }));
         return jsonContent(computeFingerprint(event));
+      }
+    });
+
+    api.registerTool({
+      name: "termind_incident_registry_query",
+      description: "Look up a Termind failure fingerprint in the incident registry. Plan returns capability hints (memory.get / kv.get) and a missing-capability fallback; parse turns the raw record into branch (new_case | recurrence | escalation_candidate) plus windowed occurrence and affectedUsers counts. This tool does not access memory, network, shell, or files.",
+      parameters: {
+        type: "object",
+        additionalProperties: true,
+        properties: {
+          action: { type: "string", enum: ["plan", "parse"] },
+          fingerprint: { type: "string" },
+          windowMinutes: { type: "number" },
+          now: { type: "string", description: "ISO8601 timestamp; defaults to current time when omitted." },
+          branchKind: { type: "string", enum: ["main", "release", "feature", "other", ""] },
+          raw: {
+            description: "Raw record returned from memory.get/kv.get. Accepts a JSON string or a pre-decoded object; null means lookup miss.",
+            anyOf: [
+              { type: "string" },
+              { type: "object" },
+              { type: "null" }
+            ]
+          },
+          missingCapability: { type: "boolean" }
+        }
+      },
+      async execute(_callId, params) {
+        return jsonContent(incidentRegistryTool(params));
+      }
+    });
+
+    api.registerTool({
+      name: "termind_incident_registry_upsert",
+      description: "Plan a registry write-back after a Termind alert is delivered. Plan computes the next record (occurrences+1, firstSeen preserved, lastSeen=now, events appended, owner/reportUrl merged) and emits memory.set/kv.set capability hints; parse acks the capability invocation result. This tool does not access memory, network, shell, or files.",
+      parameters: {
+        type: "object",
+        additionalProperties: true,
+        properties: {
+          action: { type: "string", enum: ["plan", "parse"] },
+          fingerprint: { type: "string" },
+          branchKind: { type: "string" },
+          reportUrl: { type: "string" },
+          user: { type: "string" },
+          branch: { type: "string" },
+          gitCommit: { type: "string" },
+          environment: { type: "string" },
+          occurredAt: { type: "string" },
+          windowMinutes: { type: "number" },
+          status: { type: "string" },
+          owner: {
+            type: "object",
+            additionalProperties: true
+          },
+          event: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              user: { type: "string" },
+              branch: { type: "string" },
+              commit: { type: "string" },
+              environment: { type: "string" },
+              timestamp: { type: "string" }
+            }
+          },
+          priorRaw: {
+            description: "Prior registry record returned from memory.get/kv.get (string or pre-decoded object). null means new case.",
+            anyOf: [
+              { type: "string" },
+              { type: "object" },
+              { type: "null" }
+            ]
+          },
+          // parse-time fields
+          ack: {},
+          result: {},
+          output: { type: "string" },
+          stdout: { type: "string" },
+          stderr: { type: "string" },
+          exitCode: { type: "number" },
+          written: { type: "boolean" },
+          record: {}
+        }
+      },
+      async execute(_callId, params) {
+        return jsonContent(incidentRegistryUpsertTool(params));
+      }
+    });
+
+    api.registerTool({
+      name: "termind_lark_knowledge_search",
+      description: "Plan/parse Lark/Feishu doc & wiki knowledge search via lark-cli docs +search. lark-cli docs +search is **user-only** (--as bot is rejected by lark-cli); plan refuses sender=bot and returns missingCapability=user_oauth so the orchestrator can degrade gracefully. action=queries derives ordered candidate queries from a failure event. action=plan emits one lark-cli command. action=parse extracts {token,type,title,url,ownerOpenId,snippet,score,lastModified}. This tool does not execute shell commands.",
+      parameters: {
+        type: "object",
+        additionalProperties: true,
+        properties: {
+          action: { type: "string", enum: ["queries", "plan", "parse"] },
+          // queries
+          event: failureEventSchema,
+          // plan
+          sender: { type: "string", enum: ["user", "bot"] },
+          query: { type: "string" },
+          pageSize: { type: "number" },
+          pageToken: { type: "string" },
+          profile: { type: "string" },
+          larkCliConfigDir: { type: "string" },
+          configDir: { type: "string" },
+          filter: {
+            anyOf: [
+              { type: "string" },
+              { type: "object" }
+            ]
+          },
+          // parse
+          stdout: { type: "string" },
+          stderr: { type: "string" },
+          output: { type: "string" },
+          error: { type: "string" },
+          exitCode: { type: "number" }
+        }
+      },
+      async execute(_callId, params) {
+        return jsonContent(larkKnowledgeSearchTool(params));
+      }
+    });
+
+    api.registerTool({
+      name: "termind_owner_resolve",
+      description: "Plan/parse a git author -> Lark open_id resolution via lark-cli contact +search-user. +search-user is user-only; plan refuses sender=bot and returns missingCapability=user_oauth + a label-only owner fallback. parse picks the highest-confidence candidate (high=email match, medium=name match, label_only=fallback). This tool does not execute shell commands.",
+      parameters: {
+        type: "object",
+        additionalProperties: true,
+        properties: {
+          action: { type: "string", enum: ["plan", "parse"] },
+          sender: { type: "string", enum: ["user", "bot"] },
+          email: { type: "string" },
+          name: { type: "string" },
+          authorEmail: { type: "string" },
+          authorName: { type: "string" },
+          queryKind: { type: "string", enum: ["email", "name"] },
+          profile: { type: "string" },
+          larkCliConfigDir: { type: "string" },
+          configDir: { type: "string" },
+          stdout: { type: "string" },
+          stderr: { type: "string" },
+          output: { type: "string" },
+          error: { type: "string" },
+          exitCode: { type: "number" }
+        }
+      },
+      async execute(_callId, params) {
+        return jsonContent(ownerResolveTool(params));
       }
     });
 

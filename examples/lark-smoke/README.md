@@ -57,7 +57,7 @@ export TERMIND_LARK_SENDER=bot
 This bypasses the agent and verifies `lark-cli` can send an interactive card:
 
 ```bash
-plugin/examples/lark-smoke/scripts/openclaw-message-card-smoke.sh
+examples/lark-smoke/scripts/openclaw-message-card-smoke.sh
 ```
 
 Expected result: `lark-cli` returns a successful message response.
@@ -70,7 +70,7 @@ it by executing the generated `lark-cli` command through OpenClaw exec:
 ```bash
 openclaw agent --local --agent main \
   --session-id termind-lark-message-smoke \
-  --message "$(cat plugin/examples/lark-smoke/prompts/agent-message-card-smoke.md)" \
+  --message "$(cat examples/lark-smoke/prompts/agent-message-card-smoke.md)" \
   --timeout 180
 ```
 

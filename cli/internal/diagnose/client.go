@@ -252,26 +252,33 @@ func buildPrompt(req *Request) string {
 	return b.String()
 }
 
+// buildAlertPrompt 构造发给 OpenClaw agent 的 user message.
+//
+// 设计原则: skill 文档 (termind-lark-alert/SKILL.md) 拥有 "如何编排 tool" 的
+// 知识 (调用顺序、registry 查询、分支决策、card 渲染等). prompt 只负责两件事:
+//
+//  1. **router hint** — 明确告诉 agent 用哪个 skill, 防止多 skill 误选;
+//  2. **hard contract** — 复述 CLI 作为 caller 不可妥协的交付契约
+//     (lark-cli 唯一发送、退出码就是验收等). 这些是即使 skill 文档被改动
+//     CLI 也不愿意失守的底线, 在 user-message 优先级上压制 LLM, 给客户端
+//     一份"独立于 skill 实现"的契约.
+//
+// 注意: 凡是属于 skill 内部知识 (具体 tool 名、调用顺序、字段名等) 都不应
+// 出现在这里 — 那些是 skill 的实现细节, 在 prompt 里 hardcode 会和 skill
+// 形成双源真相, 后续新增/重命名 tool 时维护成本极高.
 func buildAlertPrompt(req *Request) string {
 	event := failureEventFromRequest(req)
 	b, _ := json.MarshalIndent(event, "", "  ")
 
 	var out strings.Builder
 	out.WriteString("Use the termind-lark-alert skill.\n\n")
-	out.WriteString("Termind detected a failed terminal command. Treat the following JSON as the source event.\n")
-	out.WriteString("Call the Termind plugin tools in this order:\n")
-	out.WriteString("1. termind_event_redact\n")
-	out.WriteString("2. termind_fingerprint_compute\n")
-	out.WriteString("3. termind_failure_classify\n")
-	out.WriteString("4. termind_lark_card_build\n")
-	out.WriteString("5. termind_lark_cli_send_command_build\n\n")
-	out.WriteString("Then execute each returned lark-cli command with OpenClaw exec, using the exact command and args returned by the tool.\n")
-	out.WriteString("Use lark-cli as the primary Lark/Feishu sender at runtime.\n")
-	out.WriteString("Never use OpenClaw Feishu tools, direct Feishu APIs, the message tool, or fallback scripts to send this alert.\n")
-	out.WriteString("If exec is unavailable, say `tools.alsoAllow must include exec` and do not claim delivery.\n")
-	out.WriteString("If lark-cli exits non-zero, return its exact stdout/stderr and do not try another sender.\n")
-	out.WriteString("Only claim the card was sent after lark-cli returns successfully for every enabled target.\n")
-	out.WriteString("Preserve larkTargets, larkSender, larkChatId, and larkUserOpenId when passing the event between tools.\n\n")
+	out.WriteString("Termind detected a failed terminal command. Treat the following JSON as the source event ")
+	out.WriteString("and follow the skill's flow to redact, dedupe, classify, build the card, and deliver.\n\n")
+	out.WriteString("Hard contract (do not violate regardless of skill docs):\n")
+	out.WriteString("- lark-cli is the ONLY valid Lark/Feishu sender. Never use OpenClaw Feishu tools, direct Feishu APIs, the message tool, or fallback scripts.\n")
+	out.WriteString("- If exec is unavailable, return `tools.alsoAllow must include exec` and stop without claiming delivery.\n")
+	out.WriteString("- Claim delivery only after lark-cli exits 0 for every enabled target.\n")
+	out.WriteString("- If lark-cli exits non-zero, return its exact stdout/stderr and do not try another sender.\n\n")
 	out.WriteString("Failure event:\n")
 	out.WriteString("```json\n")
 	out.Write(b)
@@ -282,14 +289,33 @@ func buildAlertPrompt(req *Request) string {
 func failureEventFromRequest(req *Request) map[string]any {
 	tail := cleanFailureText(req.OutputTail)
 	event := map[string]any{
-		"summary":     summarizeFailure(req),
-		"command":     strings.TrimSpace(req.Command),
-		"severity":    "warning",
-		"exitCode":    req.ExitCode,
-		"cwd":         req.Cwd,
-		"environment": req.Lang,
-		"shell":       req.Shell,
-		"tail":        trimForPrompt(tail, 4000),
+		"summary":  summarizeFailure(req),
+		"command":  strings.TrimSpace(req.Command),
+		"severity": "warning",
+		"exitCode": req.ExitCode,
+		"cwd":      req.Cwd,
+		"shell":    req.Shell,
+		"tail":     trimForPrompt(tail, 4000),
+	}
+	// enrich 字段按 optional 注入: plugin 侧 schema 允许缺省, 但只要 CLI 探测到了
+	// 就传过去, 指纹会自动把 project 纳入归并, 卡片可以展示 branch/commit.
+	// environment 是展示向的"主机/工具链"摘要, 与 Lang (用户语言偏好) 不是同一维度,
+	// Lang 只在 buildPrompt 里影响输出语种, 不进 event.
+	if v := strings.TrimSpace(req.User); v != "" {
+		event["user"] = v
+	}
+	if v := strings.TrimSpace(req.Project); v != "" {
+		event["project"] = v
+	}
+	if v := strings.TrimSpace(req.Branch); v != "" {
+		event["branch"] = v
+		event["branchKind"] = branchKind(v)
+	}
+	if v := strings.TrimSpace(req.GitCommit); v != "" {
+		event["gitCommit"] = v
+	}
+	if v := buildEnvironmentDescription(req); v != "" {
+		event["environment"] = v
 	}
 	if sender := strings.TrimSpace(req.Lark.Sender); sender != "" {
 		event["larkSender"] = sender
@@ -324,6 +350,48 @@ func failureEventFromRequest(req *Request) map[string]any {
 		}
 	}
 	return event
+}
+
+// buildEnvironmentDescription 拼一条"主机/工具链"摘要, 例如:
+//
+//	"darwin 24.0.0 · go1.22.3"
+//	"linux 5.15.0-105"
+//
+// 字段全部缺失时返回空串, 由 caller 决定是否写进 event.
+// 这个描述只做展示用 (卡片右上角), 不参与指纹计算; 指纹走 project 更稳定.
+func buildEnvironmentDescription(req *Request) string {
+	parts := make([]string, 0, 2)
+	if v := strings.TrimSpace(req.OS); v != "" {
+		parts = append(parts, v)
+	}
+	if v := strings.TrimSpace(req.GoVersion); v != "" {
+		parts = append(parts, v)
+	}
+	return strings.Join(parts, " · ")
+}
+
+// branchKind 把分支名归类成 plugin classify.js 能识别的类别:
+//
+//	main / trunk / master         → "main"   (触发 incident 升级路径)
+//	release/* hotfix/*            → "release"
+//	feat/* feature/* dev/*        → "feature"
+//	其他                           → "other"
+//
+// 返回值会作为 event.branchKind 传给 plugin 侧 classify.
+func branchKind(branch string) string {
+	b := strings.ToLower(strings.TrimSpace(branch))
+	switch b {
+	case "main", "master", "trunk":
+		return "main"
+	}
+	switch {
+	case strings.HasPrefix(b, "release/"), strings.HasPrefix(b, "hotfix/"):
+		return "release"
+	case strings.HasPrefix(b, "feat/"), strings.HasPrefix(b, "feature/"),
+		strings.HasPrefix(b, "dev/"), strings.HasPrefix(b, "fix/"):
+		return "feature"
+	}
+	return "other"
 }
 
 func summarizeFailure(req *Request) string {

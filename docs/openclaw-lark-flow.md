@@ -28,12 +28,12 @@ exec running `lark-cli`.
 - `plugin/`: OpenClaw Termind plugin.
 - `plugin/skills/termind-lark-alert/`: Skill that tells OpenClaw how to build
   and send Feishu cards.
-- `plugin/examples/lark-smoke/`: Repeatable smoke tests for Feishu card sending.
+- `examples/lark-smoke/`: Repeatable smoke tests for Feishu card sending. Lives at the repo root, **not** inside `plugin/`, so the plugin tarball passes OpenClaw's safety scanner (no `child_process` in plugin source).
 - `docs/openclaw-lark-flow.md`: This handoff.
 
 Removed/retired:
 
-- `poc/lark`: folded into `plugin/examples/lark-smoke`.
+- `poc/lark`: folded into `examples/lark-smoke`.
 - `experiments/openclaw-plugin`: folded into the safe plugin shape where
   Termind tools only generate data and OpenClaw owns command execution.
 
@@ -132,7 +132,7 @@ This checks that `lark-cli` can send a card without involving the agent:
 export TERMIND_LARK_TARGET_ID=oc_xxx
 export TERMIND_LARK_TARGET_TYPE=chat
 export TERMIND_LARK_SENDER=bot
-plugin/examples/lark-smoke/scripts/openclaw-message-card-smoke.sh
+examples/lark-smoke/scripts/openclaw-message-card-smoke.sh
 ```
 
 Expected result: `lark-cli` returns a successful message response.
@@ -144,7 +144,7 @@ This checks the skill/tool/lark-cli path:
 ```bash
 openclaw agent --local --agent main \
   --session-id termind-lark-message-smoke \
-  --message "$(cat plugin/examples/lark-smoke/prompts/agent-message-card-smoke.md)" \
+  --message "$(cat examples/lark-smoke/prompts/agent-message-card-smoke.md)" \
   --timeout 180
 ```
 
@@ -238,5 +238,8 @@ another.
   interactions after that channel exists.
 - Add dedupe/throttle so repeated typo commands do not spam Feishu.
 - Improve summary extraction so prompts like `%` are not used as alert titles.
-- Add project/git metadata enrichment in the CLI before submitting events.
+- ~~Add project/git metadata enrichment in the CLI before submitting events.~~
+  Done: `cli/internal/enrich` now collects `user / project / branch / gitCommit
+  / os / goVersion` with per-step timeout before `diagnose.Request` leaves the
+  CLI.
 - Add structured report creation/update flow after the card MVP stabilizes.

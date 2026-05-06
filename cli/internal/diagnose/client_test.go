@@ -259,11 +259,18 @@ func TestDiagnose_AlertSubmitsTermindLarkSkillPrompt(t *testing.T) {
 	if strings.Join(ms.seenMethods, ",") != strings.Join([]string{MethodAgent, MethodAgentWait, MethodSessionsGet}, ",") {
 		t.Fatalf("methods=%v, want agent then agent.wait then sessions.get", ms.seenMethods)
 	}
+	// Required pieces of the prompt:
+	//   - skill router hint
+	//   - the four hard-contract rules (lark-cli only, exec must be allowed,
+	//     exit-0 verification, exact stdout/stderr on failure)
+	//   - the literal targets and command/tail so plugin tools have data to chew on
 	for _, want := range []string{
 		"Use the termind-lark-alert skill.",
-		"termind_lark_card_build",
-		"termind_lark_cli_send_command_build",
-		"Use lark-cli as the primary Lark/Feishu sender at runtime.",
+		"Hard contract",
+		"lark-cli is the ONLY valid Lark/Feishu sender",
+		"tools.alsoAllow must include exec",
+		"Claim delivery only after lark-cli exits 0 for every enabled target",
+		"do not try another sender",
 		"oc_test",
 		"ou_test",
 		"go run ./cmd/grade serve",
@@ -273,7 +280,13 @@ func TestDiagnose_AlertSubmitsTermindLarkSkillPrompt(t *testing.T) {
 			t.Fatalf("alert prompt missing %q:\n%s", want, req.Message)
 		}
 	}
+	// Skill-implementation details that must not be re-asserted in the prompt
+	// (they live in SKILL.md only, to avoid double-source maintenance).
 	for _, banned := range []string{
+		"termind_lark_card_build",
+		"termind_lark_cli_send_command_build",
+		"termind_event_redact",
+		"termind_fingerprint_compute",
 		"OpenClaw's `" + "message" + "` tool",
 		"channel" + ": " + "feishu",
 		"message" + "(action=send",
@@ -378,6 +391,85 @@ func TestDiagnose_LastAssistantTextReadsContentParts(t *testing.T) {
 	}, time.Now().Add(-time.Second))
 	if got != "hello world" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestFailureEventFromRequestMapsEnrichFields(t *testing.T) {
+	req := &Request{
+		Command:    "go test ./...",
+		ExitCode:   1,
+		OutputTail: "FAIL\nauthorization: Bearer super-secret\n",
+		Shell:      "/bin/zsh",
+		Cwd:        "/repo/be-grade",
+		Lang:       "zh_CN.UTF-8",
+		User:       "matterhorn",
+		Project:    "be-grade",
+		Branch:     "feat/rank-v2",
+		GitCommit:  "8e4d21a",
+		OS:         "darwin 24.0.0",
+		GoVersion:  "go1.22.3",
+	}
+
+	ev := failureEventFromRequest(req)
+
+	if got, want := ev["user"], "matterhorn"; got != want {
+		t.Errorf("user=%v, want %v", got, want)
+	}
+	if got, want := ev["project"], "be-grade"; got != want {
+		t.Errorf("project=%v, want %v", got, want)
+	}
+	if got, want := ev["branch"], "feat/rank-v2"; got != want {
+		t.Errorf("branch=%v, want %v", got, want)
+	}
+	if got, want := ev["branchKind"], "feature"; got != want {
+		t.Errorf("branchKind=%v, want %v", got, want)
+	}
+	if got, want := ev["gitCommit"], "8e4d21a"; got != want {
+		t.Errorf("gitCommit=%v, want %v", got, want)
+	}
+	if got, want := ev["environment"], "darwin 24.0.0 · go1.22.3"; got != want {
+		t.Errorf("environment=%v, want %v", got, want)
+	}
+	// Lang 是输出语种偏好, 不该污染 environment
+	if _, exists := ev["lang"]; exists {
+		t.Errorf("event should not carry lang; got %v", ev["lang"])
+	}
+}
+
+func TestFailureEventFromRequestOmitsEmptyEnrichFields(t *testing.T) {
+	req := &Request{
+		Command:    "false",
+		ExitCode:   1,
+		OutputTail: "",
+		// 所有 enrich 字段都空
+	}
+	ev := failureEventFromRequest(req)
+
+	for _, k := range []string{"user", "project", "branch", "branchKind", "gitCommit", "environment"} {
+		if _, exists := ev[k]; exists {
+			t.Errorf("event should omit %q when enrich missing, got %v", k, ev[k])
+		}
+	}
+}
+
+func TestBranchKindClassifies(t *testing.T) {
+	cases := map[string]string{
+		"main":             "main",
+		"master":           "main",
+		"trunk":            "main",
+		"release/2026-05":  "release",
+		"hotfix/rank":      "release",
+		"feat/rank-v2":     "feature",
+		"feature/foo":      "feature",
+		"fix/rank-nil":     "feature",
+		"dev/matterhorn":   "feature",
+		"topic/experiment": "other",
+		"":                 "other",
+	}
+	for branch, want := range cases {
+		if got := branchKind(branch); got != want {
+			t.Errorf("branchKind(%q)=%q, want %q", branch, got, want)
+		}
 	}
 }
 

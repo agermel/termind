@@ -12,14 +12,61 @@ user wants a Lark/Feishu notification.
 
 1. Call `termind_event_redact` on the failure event.
 2. Call `termind_fingerprint_compute` if the event has no fingerprint.
-3. Call `termind_failure_classify` to decide severity and routing.
-4. Call `termind_lark_card_build` to produce interactive card JSON.
-5. Call `termind_lark_cli_send_command_build` with the redacted event and card.
-6. Execute each returned `lark-cli` command with OpenClaw exec.
-7. If exec is unavailable, return a concise failure saying
-   `tools.alsoAllow must include exec`; do not claim delivery.
-8. If any `lark-cli` command exits non-zero, return the exact stderr/stdout and
-   do not try another sender.
+3. Look up the fingerprint in the incident registry (skill
+   `termind-incident-registry`):
+   1. Call `termind_incident_registry_query` with `action: "plan"`.
+   2. Execute the lookup using the first available capability:
+      - prefer `memory.get` with the returned `key`,
+      - fall back to `kv.get` with the namespace/key in `capabilityHints[1]`,
+      - if neither is available, pass `missingCapabilityFallback` directly to
+        the parse step. Do not invent results.
+   3. Call `termind_incident_registry_query` with `action: "parse"`, supplying
+      the raw value from the capability and `branchKind` from the event.
+   4. **Keep the raw capability value** (the JSON string from `memory.get` /
+      `kv.get`) in scope; step 13 reuses it as `priorRaw` for the upsert plan.
+   5. Merge the parsed result into the event before classify and card-build:
+      - `event.occurrences       = record.occurrences`
+      - `event.affectedUsers     = record.affectedUsers.length`
+      - `event.windowOccurrences = record.windowOccurrences`
+      - `event.windowMinutes     = record.windowMinutes`
+      - `event.firstSeen         = record.firstSeen` (only if non-empty)
+      - `event.lastSeen          = record.lastSeen`  (only if non-empty)
+      - `event.reportUrl         = record.reportUrl` (only if non-empty)
+      - `event.registryBranch    = result.branch`
+4. Call `termind_failure_classify`. Classify reads the merged `occurrences`
+   and `affectedUsers` to upgrade severity.
+5. **Owner resolve (step 12)**: invoke skill `termind-owner-resolve` with the
+   git author email/name from the failure event. Merge the resulting
+   `owner` onto the event. If the skill returns
+   `missingCapability: "user_oauth"`, accept the label-only owner; do not
+   block delivery.
+6. **Knowledge RAG (step 9)**: if classify returned `severity` ≥ `warning`,
+   invoke skill `termind-knowledge-rag`, which delegates to
+   `termind-lark-knowledge-search` for the Lark/Feishu doc layer. Merge the
+   top hits onto `event.knowledgeHits`. Skip on `severity: "info"`.
+7. Call `termind_lark_card_build` with the merged event so the card can
+   render the 🆕 / 🔁 / ⛔️ branch styling, the history/escalation block,
+   the @-mention owner, the report link, and the related-knowledge block.
+8. Call `termind_lark_cli_send_command_build` with the redacted event and card.
+9. Execute each returned `lark-cli` command with OpenClaw exec.
+10. If exec is unavailable, return a concise failure saying
+    `tools.alsoAllow must include exec`; do not claim delivery.
+11. If any `lark-cli` command exits non-zero, return the exact stderr/stdout and
+    do not try another sender.
+12. **Registry write-back (step 13)**: only after every enabled `lark-cli`
+    command exits successfully:
+    1. If `registryBranch === "new_case"`, the new-case report doc is
+       handled by skill `termind-incident-report`. Run that skill and use
+       its returned `reportUrl` for the upsert.
+    2. If `registryBranch` is `recurrence` or `escalation_candidate`, run
+       skill `termind-incident-recurrence` (which appends a row to the
+       prior report and writes back the registry).
+    3. Otherwise (skills above unavailable), call
+       `termind_incident_registry_upsert` directly with `action: "plan"`,
+       passing the `priorRaw` saved in step 3.4. Execute the first
+       available `memory.set` / `kv.set` capability hint, then call
+       `action: "parse"` with the ack. A failed write must not be
+       reported to the user as a delivery failure; log it instead.
 
 ## Rules
 

@@ -30,6 +30,11 @@ const (
 
 // Request 是一次 termind shell 诊断的输入。
 //
+// 前 6 个字段是基础现场 (cmdbuf + 进程环境); 后 6 个是 enrich 补齐的仓库/主机
+// 元数据, 供 OpenClaw plugin 做指纹分组、报告立案、责任人归因用. enrich 字段
+// 任意一项都可能为空 (不是 git 仓库、uname 不可用等); plugin 侧按 optional
+// 处理, 不要求非空.
+//
 // 字段:
 //   - Command      用户实际输入的命令(zsh 里从 history 拿)
 //   - ExitCode     命令退出码,非 0 才触发 ——plugin 可据此判断严重度
@@ -37,6 +42,12 @@ const (
 //   - Shell        子 shell 名,比如 "zsh"/"bash"——影响提示/修复建议语法
 //   - Cwd          命令执行时的工作目录,用来做 repo 上下文
 //   - Lang         用户语言环境,"zh-CN"/"en-US",让 plugin 出对应语种
+//   - User         操作者用户名 (enrich, 用于 @ 认领)
+//   - Project      cwd 所属仓库/目录名 (enrich, 参与指纹)
+//   - Branch       当前 git 分支 (enrich, 卡片展示用)
+//   - GitCommit    当前 HEAD 短哈希 (enrich, 卡片展示用)
+//   - OS           "<goos> <kernel>" (enrich, 卡片展示用)
+//   - GoVersion    cwd 对应 go.mod 的 go 版本 (enrich, 可选)
 type Request struct {
 	Command    string `json:"command"`
 	ExitCode   int    `json:"exit_code"`
@@ -44,6 +55,12 @@ type Request struct {
 	Shell      string `json:"shell,omitempty"`
 	Cwd        string `json:"cwd,omitempty"`
 	Lang       string `json:"lang,omitempty"`
+	User       string `json:"user,omitempty"`
+	Project    string `json:"project,omitempty"`
+	Branch     string `json:"branch,omitempty"`
+	GitCommit  string `json:"git_commit,omitempty"`
+	OS         string `json:"os,omitempty"`
+	GoVersion  string `json:"go_version,omitempty"`
 	Lark       LarkRouting
 }
 

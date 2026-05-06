@@ -1,7 +1,7 @@
 {
   "id": "termind",
   "name": "Termind",
-  "version": "0.1.1-dev.4",
+  "version": "0.1.1-dev.5",
   "description": "Safe Termind terminal intelligence tools for OpenClaw orchestration.",
   "configSchema": {
     "type": "object",
@@ -100,6 +100,10 @@
     "tools": [
       "termind_event_redact",
       "termind_fingerprint_compute",
+      "termind_incident_registry_query",
+      "termind_incident_registry_upsert",
+      "termind_lark_knowledge_search",
+      "termind_owner_resolve",
       "termind_failure_classify",
       "termind_lark_card_build",
       "termind_lark_cli_auth_login",
@@ -121,6 +125,10 @@
     "./skills/termind-lark-bot-profiles",
     "./skills/termind-lark-cli-checks",
     "./skills/termind-knowledge-rag",
-    "./skills/termind-incident-report"
+    "./skills/termind-lark-knowledge-search",
+    "./skills/termind-owner-resolve",
+    "./skills/termind-incident-registry",
+    "./skills/termind-incident-report",
+    "./skills/termind-incident-recurrence"
   ]
 }

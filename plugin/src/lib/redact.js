@@ -22,13 +22,29 @@ export function normalizeFailureEvent(input, options = {}) {
     larkUserOpenId: optionalString(input.larkUserOpenId ?? input.userOpenId, 160),
     larkSender: normalizeLarkSender(input.larkSender ?? input.sender),
     larkTargets: normalizeLarkTargets(input.larkTargets ?? input.targets),
+    larkForwardingIdentities: normalizeForwardingIdentities(input.larkForwardingIdentities),
+    larkForwardingRoutes: normalizeForwardingRoutes(input.larkForwardingRoutes),
     stackTop: Array.isArray(input.stackTop)
       ? input.stackTop.map(value => optionalString(value, 300)).filter(Boolean).slice(0, 5)
       : [],
     reportUrl: optionalString(input.reportUrl, 500),
     occurrences: numberOrZero(input.occurrences),
     affectedUsers: numberOrZero(input.affectedUsers),
-    branchKind: optionalString(input.branchKind, 40)
+    branchKind: optionalString(input.branchKind, 40),
+    // termind-incident-registry skill 把这些字段 merge 回 event 后再传入
+    // termind_lark_card_build, classify, report 工具. normalize 必须保留它们,
+    // 否则 card 拿不到 registryBranch, 一律渲染成兜底标题, 历史块也失踪.
+    registryBranch: normalizeRegistryBranch(input.registryBranch),
+    windowOccurrences: numberOrZero(input.windowOccurrences),
+    windowMinutes: numberOrZero(input.windowMinutes),
+    firstSeen: optionalString(input.firstSeen, 64),
+    lastSeen: optionalString(input.lastSeen, 64),
+    // 责任人路由: termind-owner-resolve skill 把 git author -> lark open_id
+    // 解析的结果 merge 回 event, card / report 据此 @ 责任人.
+    owner: normalizeOwner(input.owner),
+    // 知识 RAG 命中: termind-lark-knowledge-search skill 把检索到的 doc 命中
+    // 作为只读字段挂到 event, card / report 据此渲染参考链接.
+    knowledgeHits: normalizeKnowledgeHits(input.knowledgeHits)
   };
 }
 
@@ -74,9 +90,108 @@ function normalizeLarkTargets(value) {
   })).filter(target => target.id).slice(0, 10);
 }
 
+// CLI 端 (Termind cli/internal/diagnose) 通过 larkForwarding{Identities,Routes}
+// 把 ~/.config/termind/config.json 里的 lark-cli 多 identity 路由表传给 plugin.
+// buildLarkCliCommands 优先消费这两个字段; 如果 normalize 这里把它们丢掉,
+// 真实链路就只能 fallback 到 larkTargets / larkChatId / larkUserOpenId — 但 CLI
+// 实际上不一定填 larkTargets, 所以会出现"链路无报错却发不出消息"的隐性故障.
+//
+// 因此 normalize 必须保留这两个字段, 同时做一层轻度净化, 防止上游传入垃圾.
+function normalizeForwardingIdentities(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out = {};
+  for (const [key, identity] of Object.entries(value)) {
+    if (!identity || typeof identity !== "object") continue;
+    const cleaned = {
+      id: optionalString(identity.id, 200),
+      kind: identity.kind === "user" ? "user" : "bot",
+      label: optionalString(identity.label, 200),
+      appId: optionalString(identity.appId, 200),
+      userOpenId: optionalString(identity.userOpenId, 200),
+      profile: optionalString(identity.profile, 200),
+      larkCliConfigDir: optionalString(identity.larkCliConfigDir, 500),
+      enabled: identity.enabled !== false,
+      source: optionalString(identity.source, 200),
+      slot: optionalString(identity.slot, 200)
+    };
+    // 至少要有一个稳定标识 (id 或 appId), 否则下游无法路由到具体 lark-cli profile.
+    if (!cleaned.id && !cleaned.appId) continue;
+    out[String(key).slice(0, 200)] = cleaned;
+  }
+  return out;
+}
+
+function normalizeForwardingRoutes(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map(route => {
+    if (!route || typeof route !== "object") return null;
+    const target = route.target && typeof route.target === "object"
+      ? {
+          type: normalizeLarkTargetType(route.target.type),
+          id: optionalString(route.target.id, 160),
+          label: optionalString(route.target.label, 120)
+        }
+      : null;
+    if (!target?.id) return null;
+    return {
+      identityId: optionalString(route.identityId, 200),
+      target,
+      enabled: route.enabled !== false
+    };
+  }).filter(Boolean).slice(0, 20);
+}
+
 function normalizeLarkTargetType(value) {
   if (value === "user" || value === "bot") return value;
   return "chat";
+}
+
+function normalizeRegistryBranch(value) {
+  const s = String(value ?? "").trim().toLowerCase();
+  if (s === "new_case" || s === "recurrence" || s === "escalation_candidate") return s;
+  return "";
+}
+
+function normalizeOwner(owner) {
+  if (!owner || typeof owner !== "object" || Array.isArray(owner)) return null;
+  const cleaned = {
+    kind: optionalString(owner.kind, 40),
+    openId: optionalString(owner.openId ?? owner.open_id, 200),
+    label: optionalString(owner.label ?? owner.name, 200),
+    email: optionalString(owner.email, 200),
+    source: optionalString(owner.source, 80),
+    confidence: optionalString(owner.confidence, 40)
+  };
+  // 没有任何稳定标识时丢弃, 避免 card 渲染成 "@undefined".
+  if (!cleaned.openId && !cleaned.label && !cleaned.email) return null;
+  return cleaned;
+}
+
+function normalizeKnowledgeHits(value) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object") continue;
+    const token = optionalString(raw.token ?? raw.objToken ?? raw.docToken, 200);
+    if (!token) continue;
+    const key = token + "|" + optionalString(raw.type, 40);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      token,
+      type: optionalString(raw.type, 40),
+      title: optionalString(raw.title, 300),
+      url: optionalString(raw.url, 500),
+      ownerOpenId: optionalString(raw.ownerOpenId ?? raw.owner_open_id, 200),
+      ownerName: optionalString(raw.ownerName ?? raw.owner_name, 200),
+      lastModified: optionalString(raw.lastModified ?? raw.last_modified, 64),
+      snippet: optionalString(raw.snippet, 600),
+      score: numberOrZero(raw.score)
+    });
+    if (out.length >= 10) break;
+  }
+  return out;
 }
 
 function normalizeLarkSender(value) {

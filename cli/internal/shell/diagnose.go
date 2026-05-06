@@ -17,6 +17,7 @@ import (
 	"termind/internal/config"
 	"termind/internal/debuglog"
 	"termind/internal/diagnose"
+	"termind/internal/enrich"
 	"termind/internal/gateway"
 	"termind/internal/identity"
 	"termind/internal/osc133"
@@ -319,6 +320,13 @@ func (d *dispatcher) cancelActive(reason string) {
 // 出错不 panic,只打 log 和 Fail 给用户看。
 func (d *dispatcher) requestFromCommand(c cmdbuf.Command) *diagnose.Request {
 	cwd, _ := os.Getwd()
+
+	// enrich 有自己的内部超时 (~300ms), 即使 git 卡死也不会拖住诊断链路.
+	// 任何 enrich 字段为空都不影响后续流程, plugin 侧按 optional 处理.
+	enrichCtx, enrichCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctxMeta := enrich.Collect(enrichCtx, cwd)
+	enrichCancel()
+
 	lark := diagnose.LarkRouting{}
 	if cfg, err := config.Load(); err == nil && cfg != nil {
 		lark.UserOpenID = strings.TrimSpace(cfg.Lark.UserOpenID)
@@ -369,6 +377,12 @@ func (d *dispatcher) requestFromCommand(c cmdbuf.Command) *diagnose.Request {
 		Shell:      d.shellBin,
 		Cwd:        cwd,
 		Lang:       os.Getenv("LANG"),
+		User:       ctxMeta.User,
+		Project:    ctxMeta.Project,
+		Branch:     ctxMeta.Branch,
+		GitCommit:  ctxMeta.GitCommit,
+		OS:         ctxMeta.OS,
+		GoVersion:  ctxMeta.GoVersion,
 		Lark:       lark,
 	}
 }
