@@ -118,6 +118,7 @@
   },
   "skills": [
     "./skills/termind-lark-alert",
+    "./skills/termind-lark-bot-profiles",
     "./skills/termind-lark-cli-checks",
     "./skills/termind-knowledge-rag",
     "./skills/termind-incident-report"

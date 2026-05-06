@@ -44,6 +44,7 @@ const (
 	larkStepLocalConfigureLarkCLI
 	larkStepLarkConfigBindAppID
 	larkStepLarkConfigBinding
+	larkStepLarkBotLoginInstruction
 	larkStepLocalAuthLogin
 	larkStepLocalAuthLoginStarting
 	larkStepLocalAuthLoginWaiting
@@ -325,12 +326,11 @@ func (m *larkInitModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleCommandDone(msg)
 	case larkOpenClawBotAccountsDoneMsg:
 		if msg.err != nil {
-			m.addNotice(fmt.Sprintf("✗ 读取 OpenClaw Feishu bot accounts: %v", msg.err))
+			m.addNotice(fmt.Sprintf("✗ 读取 OpenClaw lark-cli bot profiles: %v", msg.err))
 			return m.afterSourceOpenClawBots()
 		}
 		if len(msg.accounts) == 0 {
-			m.addNotice("OpenClaw Feishu bot accounts 为空。")
-			return m.afterSourceOpenClawBots()
+			msg.accounts = larkBotProfileChoices(nil)
 		}
 		m.choices = msg.accounts
 		m.selected = map[int]bool{}
@@ -614,6 +614,12 @@ func (m *larkInitModel) advanceConfirm() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.goToStep(larkStepCheckingDoctor)
+	case larkStepLarkBotLoginInstruction:
+		if !m.yes {
+			return m.afterSourceOpenClawBots()
+		}
+		m.step = larkStepLoadingOpenClawBotAccounts
+		return m, tea.Batch(m.spinner.Tick, larkOpenClawBotAccountsCmd(m.ctx, m.openClawGatewayURL, m.openClawLarkCLIConfigDir()))
 	case larkStepLocalAuthLogin:
 		if !m.yes {
 			m.prepareFinish()
@@ -777,12 +783,12 @@ func (m *larkInitModel) advanceInput(value string) (tea.Model, tea.Cmd) {
 	case larkStepLarkConfigBindAppID:
 		appID := strings.TrimSpace(value)
 		if appID == "" {
-			m.addNotice("请输入 OpenClaw 已有 bot 的 App ID，例如 cli_xxx。")
+			m.addNotice("请输入 Lark/Feishu bot 的 App ID，例如 cli_xxx。")
 			return m.prepareLarkConfigBindAppID()
 		}
 		m.larkConfigBindAppID = appID
-		m.step = larkStepLarkConfigBinding
-		return m, tea.Batch(m.spinner.Tick, larkConfigBindCmd(m.ctx, m.openClawGatewayURL, appID))
+		m.setConfirm(larkStepLarkBotLoginInstruction, true)
+		return m, nil
 	case larkStepLocalPluginSpec:
 		if value == "" {
 			return m.prepareLocalToolsAllow(), nil
@@ -969,7 +975,7 @@ func (m *larkInitModel) goToStep(step larkInitStep) (tea.Model, tea.Cmd) {
 	case larkStepCheckingDoctor:
 		m.step = larkStepCheckingDoctor
 		m.addNotice("正在通过 OpenClaw 检查运行端 lark-cli。")
-		return m, tea.Batch(m.spinner.Tick, larkDoctorCmd(m.ctx, m.openClawGatewayURL))
+		return m, tea.Batch(m.spinner.Tick, larkDoctorCmd(m.ctx, m.openClawGatewayURL, m.openClawLarkCLIConfigDir()))
 	case larkStepLocalToolsAllow:
 		return m.prepareLocalToolsAllow(), nil
 	case larkStepLocalExecAllow:
@@ -1057,6 +1063,89 @@ func larkProfileChoiceLabel(profile diagnose.LarkCLIProfile) string {
 	return strings.Join(parts, " · ")
 }
 
+const larkBotLoginChoiceID = "__lark_bot_login__"
+
+func (m *larkInitModel) openClawLarkCLIConfigDir() string {
+	return ""
+}
+
+func isLarkBotLoginChoice(choice larkTargetChoice) bool {
+	return choice.Type == "action" && choice.ID == larkBotLoginChoiceID
+}
+
+func larkBotProfileChoices(status *diagnose.LarkCLIStatus) []larkTargetChoice {
+	choices := make([]larkTargetChoice, 0)
+	seen := map[string]bool{}
+	if status != nil {
+		for _, profile := range status.Profiles {
+			if strings.EqualFold(strings.TrimSpace(profile.Identity), "user") {
+				continue
+			}
+			name := strings.TrimSpace(profile.Name)
+			if name == "" || seen[name] {
+				continue
+			}
+			seen[name] = true
+			appID := strings.TrimSpace(profile.AppID)
+			choices = append(choices, larkTargetChoice{
+				Type:    "bot",
+				ID:      firstNonEmpty(appID, name),
+				Label:   larkProfileChoiceLabel(profile),
+				Profile: name,
+				AppID:   appID,
+			})
+		}
+	}
+	choices = append(choices, larkTargetChoice{Type: "action", ID: larkBotLoginChoiceID, Label: "--- login new lark-cli bot"})
+	return choices
+}
+
+func forwardingIdentityFromBotProfileChoice(choice larkTargetChoice, configDir string) diagnose.LarkForwardingIdentity {
+	profile := strings.TrimSpace(choice.Profile)
+	if profile == "" {
+		profile = strings.TrimSpace(choice.ID)
+	}
+	appID := strings.TrimSpace(choice.AppID)
+	if appID == "" && strings.HasPrefix(profile, "cli_") {
+		appID = profile
+	}
+	label := firstNonEmpty(strings.TrimSpace(choice.Label), profile, appID)
+	id := larkIdentityID("bot", "lark-cli", firstNonEmpty(appID, profile), label)
+	return diagnose.LarkForwardingIdentity{
+		ID:               id,
+		Kind:             "bot",
+		Label:            label,
+		AppID:            appID,
+		Profile:          profile,
+		Source:           "lark-cli",
+		LarkCLIConfigDir: strings.TrimSpace(configDir),
+		Enabled:          true,
+	}
+}
+
+func larkBotConfigInitCommand(appID string, configDir string) string {
+	configDir = strings.TrimSpace(configDir)
+	if configDir == "" {
+		return "lark-cli config init --app-id " + shellQuote(strings.TrimSpace(appID)) + " --brand feishu --app-secret-stdin"
+	}
+	return strings.Join([]string{
+		"mkdir -p " + shellEnvValue(configDir),
+		"LARKSUITE_CLI_CONFIG_DIR=" + shellEnvValue(configDir) + " lark-cli config init --app-id " + shellQuote(strings.TrimSpace(appID)) + " --brand feishu --app-secret-stdin",
+	}, "\n")
+}
+
+func larkBotConfigBindCommand(appID string) string {
+	return "lark-cli config bind --source openclaw --app-id " + shellQuote(strings.TrimSpace(appID)) + " --identity bot-only"
+}
+
+func shellEnvValue(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "$HOME/") {
+		return `"$HOME/` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, "`", "\\`").Replace(strings.TrimPrefix(value, "$HOME/")) + `"`
+	}
+	return shellQuote(value)
+}
+
 func (m *larkInitModel) prepareLocalOpenClawSetup(next larkInitStep) (tea.Model, tea.Cmd) {
 	m.openClawSetupNext = next
 	if m.openClawSetupDone {
@@ -1075,14 +1164,16 @@ func (m *larkInitModel) prepareIdentitySources() (tea.Model, tea.Cmd) {
 	m.secretInput = false
 	m.input.EchoMode = textinput.EchoNormal
 	m.choices = []larkTargetChoice{
-		{Type: "source", ID: "openclaw", Label: "OpenClaw Feishu bot accounts"},
-		{Type: "source", ID: "oauth", Label: "User OAuth accounts"},
+		{Type: "source", ID: "openclaw", Label: "OpenClaw lark-cli bot profiles"},
 	}
 	m.selected = map[int]bool{}
 	for i, choice := range m.choices {
 		if m.selectedSources[choice.ID] {
 			m.selected[i] = true
 		}
+	}
+	if len(m.choices) == 1 && len(m.selectedSources) == 0 {
+		m.selected[0] = true
 	}
 	m.selectedIndex = 0
 	m.step = larkStepIdentitySources
@@ -1102,7 +1193,7 @@ func (m *larkInitModel) afterIdentitySourceSelect() (tea.Model, tea.Cmd) {
 	}
 	if m.selectedSources["openclaw"] {
 		m.step = larkStepLoadingOpenClawBotAccounts
-		return m, tea.Batch(m.spinner.Tick, larkOpenClawBotAccountsCmd(m.ctx))
+		return m, tea.Batch(m.spinner.Tick, larkOpenClawBotAccountsCmd(m.ctx, m.openClawGatewayURL, m.openClawLarkCLIConfigDir()))
 	}
 	return m.afterSourceOpenClawBots()
 }
@@ -1130,16 +1221,28 @@ func (m *larkInitModel) prepareUserOAuthAppChoice() (tea.Model, tea.Cmd) {
 
 func (m *larkInitModel) configureSelectedOpenClawBots() (tea.Model, tea.Cmd) {
 	bots := make([]larkTargetChoice, 0)
+	login := false
 	for i, choice := range m.choices {
 		if m.selected[i] {
+			if isLarkBotLoginChoice(choice) {
+				login = true
+				continue
+			}
 			bots = append(bots, choice)
 		}
+	}
+	for _, bot := range bots {
+		identity := forwardingIdentityFromBotProfileChoice(bot, m.openClawLarkCLIConfigDir())
+		m.addIdentity(identity)
+		m.addNotice("✓ Lark bot profile: " + firstNonEmpty(identity.Label, identity.Profile, identity.AppID))
+	}
+	if login {
+		return m.prepareLarkConfigBindAppID()
 	}
 	if len(bots) == 0 {
 		return m.afterSourceOpenClawBots()
 	}
-	m.step = larkStepConfiguringIdentity
-	return m, tea.Batch(m.spinner.Tick, larkOpenClawBotConfigCmd(m.ctx, m.openClawGatewayURL, bots))
+	return m.afterSourceOpenClawBots()
 }
 
 func (m *larkInitModel) addIdentity(identity diagnose.LarkForwardingIdentity) {
@@ -1149,9 +1252,11 @@ func (m *larkInitModel) addIdentity(identity diagnose.LarkForwardingIdentity) {
 	}
 	identity.Enabled = true
 	if identity.Slot == "" {
-		identity.Slot = identity.ID
+		if !strings.EqualFold(identity.Source, "lark-cli") {
+			identity.Slot = identity.ID
+		}
 	}
-	if identity.LarkCLIConfigDir == "" {
+	if identity.LarkCLIConfigDir == "" && identity.Slot != "" {
 		identity.LarkCLIConfigDir = larkSlotConfigDir(identity.Slot)
 	}
 	if m.identities == nil {
@@ -1562,7 +1667,7 @@ func (m *larkInitModel) isLoadingStep() bool {
 
 func (m *larkInitModel) isConfirmStep() bool {
 	switch m.step {
-	case larkStepEnable, larkStepDoctorFailed, larkStepLocalInstallLarkCLI, larkStepKeepExisting, larkStepAddSelf, larkStepSearchChats, larkStepSearchUsers, larkStepTestTargets, larkStepLocalInstallPlugin, larkStepLocalToolsAllow, larkStepLocalExecAllow, larkStepLocalGatewayRestart, larkStepRemoteSSH, larkStepRemoteLarkConfig, larkStepRemoteDoctor, larkStepRemotePlugin, larkStepRemoteTools, larkStepRemoteApprovals, larkStepRemoteGatewayRestart:
+	case larkStepEnable, larkStepDoctorFailed, larkStepLocalInstallLarkCLI, larkStepLarkBotLoginInstruction, larkStepKeepExisting, larkStepAddSelf, larkStepSearchChats, larkStepSearchUsers, larkStepTestTargets, larkStepLocalInstallPlugin, larkStepLocalToolsAllow, larkStepLocalExecAllow, larkStepLocalGatewayRestart, larkStepRemoteSSH, larkStepRemoteLarkConfig, larkStepRemoteDoctor, larkStepRemotePlugin, larkStepRemoteTools, larkStepRemoteApprovals, larkStepRemoteGatewayRestart:
 		return true
 	default:
 		return false
@@ -1604,9 +1709,9 @@ func (m *larkInitModel) View() string {
 	case larkStepIdentitySources:
 		body = m.renderMultiSelect("Lark 转发身份来源", "Space 勾选,Enter 确认。可以多选。")
 	case larkStepLoadingOpenClawBotAccounts:
-		body = m.renderLoading("读取 OpenClaw Feishu bot accounts", "正在读取 channels.feishu.accounts。")
+		body = m.renderLoading("读取 OpenClaw lark-cli bot profiles", "正在通过 OpenClaw agent exec 获取 lark-cli profile list。")
 	case larkStepSelectOpenClawBots:
-		body = m.renderMultiSelect("选择 OpenClaw Feishu bot", "每个 bot 会创建独立 lark-cli slot 并执行 config bind。")
+		body = m.renderMultiSelect("选择 OpenClaw lark-cli bot profile", "Space 勾选已有 bot；末尾 --- login 用于在 OpenClaw 端手动新增 bot profile。")
 	case larkStepConfiguringIdentity:
 		body = m.renderLoading("配置 Lark 身份", "正在创建独立 lark-cli slot。")
 	case larkStepUserOAuthAppChoice:
@@ -1632,9 +1737,11 @@ func (m *larkInitModel) View() string {
 	case larkStepLocalConfigureLarkCLI:
 		body = m.renderConfirm("重新检查 OpenClaw lark-cli profile?", "请先在 OpenClaw 运行端完成 lark-cli bot profile 登录/绑定；Termind 随后继续获取群聊并在这里选择。")
 	case larkStepLarkConfigBindAppID:
-		body = m.renderInput("绑定已有 OpenClaw bot", "输入已配置在 OpenClaw Feishu/Lark channel 中的 App ID（cli_xxx）。Termind 会通过 OpenClaw exec 执行 lark-cli config bind --source openclaw，不接收 app secret。")
+		body = m.renderInput("新增 lark-cli bot profile", "输入 Lark/Feishu App ID（cli_xxx）。Termind 只生成 OpenClaw 端登录命令，不接收 app_secret。")
 	case larkStepLarkConfigBinding:
 		body = m.renderLoading("绑定 OpenClaw lark-cli bot profile", "正在通过 OpenClaw exec 执行 lark-cli config bind --source openclaw --identity bot-only")
+	case larkStepLarkBotLoginInstruction:
+		body = m.renderLarkBotLoginInstruction()
 	case larkStepLocalAuthLogin:
 		body = m.renderConfirm("通过 OpenClaw 登录 lark-cli?", "Termind 会通过 OpenClaw exec 启动 lark-cli auth login，并在这里显示授权链接/验证码。")
 	case larkStepLocalAuthLoginStarting:
@@ -1823,6 +1930,35 @@ func (m *larkInitModel) renderLarkAuthLoginWaiting() string {
 	return strings.Join(lines, "\n")
 }
 
+func (m *larkInitModel) renderLarkBotLoginInstruction() string {
+	configDir := m.openClawLarkCLIConfigDir()
+	initCmd := larkBotConfigInitCommand(m.larkConfigBindAppID, configDir)
+	bindCmd := larkBotConfigBindCommand(m.larkConfigBindAppID)
+	var b strings.Builder
+	b.WriteString(initTUIAccentStyle.Render("在 OpenClaw 端登录 lark-cli bot"))
+	b.WriteString("\n")
+	b.WriteString(initTUISubtleStyle.Render("请在 OpenClaw 运行端依次执行下面两条命令；第一条会要求输入 app_secret，请在该终端粘贴，不要发给 Termind 或 agent。"))
+	b.WriteString("\n\n")
+	b.WriteString(initTUISubtleStyle.Render("1) 写入 lark-cli local workspace（输入 app_secret）："))
+	b.WriteString("\n")
+	b.WriteString(initCmd)
+	b.WriteString("\n\n")
+	b.WriteString(initTUISubtleStyle.Render("2) 同步到 OpenClaw workspace（不需要再次输入 secret）："))
+	b.WriteString("\n")
+	b.WriteString(bindCmd)
+	b.WriteString("\n\n")
+	if configDir != "" {
+		b.WriteString("OpenClaw lark-cli profile 目录: " + configDir)
+	} else {
+		b.WriteString("OpenClaw lark-cli profile 目录: ~/.lark-cli/openclaw/config.json (lark-cli 1.0.23+ openclaw workspace)")
+	}
+	b.WriteString("\n\n")
+	b.WriteString(initTUISubtleStyle.Render("两条都跑完后选择 是/Enter，Termind 会通过 skill + OpenClaw agent exec 重新获取 lark-cli bot profile 列表。"))
+	b.WriteString("\n\n")
+	b.WriteString(m.renderYesNo())
+	return b.String()
+}
+
 func (m *larkInitModel) renderLarkProfileChoice() string {
 	var b strings.Builder
 	b.WriteString(initTUIAccentStyle.Render("选择 OpenClaw lark-cli profile"))
@@ -1891,6 +2027,9 @@ func (m *larkInitModel) renderMultiSelect(title string, detail string) string {
 			mark = "☑"
 		}
 		line := fmt.Sprintf("%s %s [%s] %s %s", cursor, mark, choice.Type, choice.ID, choice.Label)
+		if isLarkBotLoginChoice(choice) {
+			line = fmt.Sprintf("%s %s %s", cursor, mark, choice.Label)
+		}
 		if i == m.selectedIndex {
 			line = initTUISelectedStyle.Render(line)
 		}
@@ -2010,7 +2149,7 @@ func (m *larkInitModel) stepProgress() int {
 		return 2
 	case larkStepLocalGatewayRestart, larkStepRemoteGatewayRestart:
 		return m.gatewayRestartProgressStep()
-	case larkStepCheckingDoctor, larkStepDoctorFailed, larkStepLocalInstallLarkCLI, larkStepLocalConfigureLarkCLI, larkStepLarkConfigBindAppID, larkStepLarkConfigBinding, larkStepLocalAuthLogin, larkStepLocalAuthLoginStarting, larkStepLocalAuthLoginWaiting:
+	case larkStepCheckingDoctor, larkStepDoctorFailed, larkStepLocalInstallLarkCLI, larkStepLocalConfigureLarkCLI, larkStepLarkConfigBindAppID, larkStepLarkConfigBinding, larkStepLarkBotLoginInstruction, larkStepLocalAuthLogin, larkStepLocalAuthLoginStarting, larkStepLocalAuthLoginWaiting:
 		return 3
 	case larkStepProfileChoice, larkStepSwitchingProfile:
 		return 4
@@ -2137,9 +2276,9 @@ func larkTestRoutesCmd(ctx context.Context, openClawGatewayURL string, identitie
 	}
 }
 
-func larkDoctorCmd(ctx context.Context, openClawGatewayURL string) tea.Cmd {
+func larkDoctorCmd(ctx context.Context, openClawGatewayURL string, configDir string) tea.Cmd {
 	return func() tea.Msg {
-		status, notices, err := larkDoctorStatusWithRetry(ctx, openClawGatewayURL, larkDoctorStatusOnce, larkDoctorRetryDelays)
+		status, notices, err := larkDoctorStatusWithRetry(ctx, openClawGatewayURL, larkDoctorStatusOnce, larkDoctorRetryDelays, configDir)
 		return larkDoctorDoneMsg{status: status, output: []byte(strings.Join(notices, "\n")), err: err}
 	}
 }
@@ -2147,18 +2286,28 @@ func larkDoctorCmd(ctx context.Context, openClawGatewayURL string) tea.Cmd {
 type larkDoctorStatusFunc func(context.Context, string) (*diagnose.LarkCLIStatus, error)
 
 func larkDoctorStatusOnce(ctx context.Context, openClawGatewayURL string) (*diagnose.LarkCLIStatus, error) {
+	return larkDoctorStatusOnceWithConfigDir(ctx, openClawGatewayURL, "")
+}
+
+func larkDoctorStatusOnceWithConfigDir(ctx context.Context, openClawGatewayURL string, configDir string) (*diagnose.LarkCLIStatus, error) {
 	conn, dc, err := initLarkDiagnoseClient(ctx, openClawGatewayURL)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
-	return dc.LarkCLIStatus(ctx)
+	return dc.LarkCLIStatus(ctx, configDir)
 }
 
-func larkDoctorStatusWithRetry(ctx context.Context, openClawGatewayURL string, check larkDoctorStatusFunc, delays []time.Duration) (*diagnose.LarkCLIStatus, []string, error) {
+func larkDoctorStatusWithRetry(ctx context.Context, openClawGatewayURL string, check larkDoctorStatusFunc, delays []time.Duration, configDir ...string) (*diagnose.LarkCLIStatus, []string, error) {
 	notices := make([]string, 0, len(delays))
 	for attempt := 0; ; attempt++ {
-		status, err := check(ctx, openClawGatewayURL)
+		var status *diagnose.LarkCLIStatus
+		var err error
+		if strings.TrimSpace(firstNonEmpty(configDir...)) != "" {
+			status, err = larkDoctorStatusOnceWithConfigDir(ctx, openClawGatewayURL, firstNonEmpty(configDir...))
+		} else {
+			status, err = check(ctx, openClawGatewayURL)
+		}
 		if err == nil {
 			return status, notices, nil
 		}
@@ -2232,13 +2381,18 @@ func larkAuthLoginCompleteCmdForIdentity(ctx context.Context, openClawGatewayURL
 	}
 }
 
-func larkOpenClawBotAccountsCmd(ctx context.Context) tea.Cmd {
+func larkOpenClawBotAccountsCmd(ctx context.Context, openClawGatewayURL string, configDir string) tea.Cmd {
 	return func() tea.Msg {
-		output, err := runOutput(ctx, 10*time.Second, "openclaw", "config", "get", "channels.feishu.accounts", "--json")
+		conn, dc, err := initLarkDiagnoseClient(ctx, openClawGatewayURL)
 		if err != nil {
-			return larkOpenClawBotAccountsDoneMsg{err: fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))}
+			return larkOpenClawBotAccountsDoneMsg{err: err}
 		}
-		return larkOpenClawBotAccountsDoneMsg{accounts: larkOpenClawBotChoices(output)}
+		defer conn.Close()
+		status, err := dc.LarkCLIStatus(ctx, configDir)
+		if err != nil {
+			return larkOpenClawBotAccountsDoneMsg{err: err}
+		}
+		return larkOpenClawBotAccountsDoneMsg{accounts: larkBotProfileChoices(status)}
 	}
 }
 
@@ -2316,6 +2470,7 @@ func larkIdentityChatsCmd(ctx context.Context, openClawGatewayURL string, identi
 			Kind:             "chat",
 			Sender:           normalizeSender(identity.Kind),
 			LarkCLIConfigDir: identity.LarkCLIConfigDir,
+			Profile:          identity.Profile,
 		})
 		if err != nil {
 			return larkIdentityChatsDoneMsg{identityID: identityID, err: err}

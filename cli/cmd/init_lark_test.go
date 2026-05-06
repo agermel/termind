@@ -411,7 +411,7 @@ func TestLarkInitModelAuthLoginCompleteRechecksOpenClawStatus(t *testing.T) {
 	}
 }
 
-func TestLarkInitModelConfigBindAppIDStartsOpenClawBind(t *testing.T) {
+func TestLarkInitModelBotLoginAppIDShowsOpenClawManualCommand(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	m := newLarkInitModel(ctx, cancel, strings.NewReader(""), &bytes.Buffer{}, &config.Config{}, "ws://127.0.0.1:18789/v1/gateway", true)
@@ -419,14 +419,30 @@ func TestLarkInitModelConfigBindAppIDStartsOpenClawBind(t *testing.T) {
 
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	got := next.(*larkInitModel)
-	if cmd == nil {
-		t.Fatalf("config bind app id should start OpenClaw bind command")
+	if cmd != nil {
+		t.Fatalf("bot login app id should not execute lark-cli from Termind")
 	}
-	if got.step != larkStepLarkConfigBinding {
-		t.Fatalf("step=%d, want %d", got.step, larkStepLarkConfigBinding)
+	if got.step != larkStepLarkBotLoginInstruction {
+		t.Fatalf("step=%d, want %d", got.step, larkStepLarkBotLoginInstruction)
 	}
 	if got.larkConfigBindAppID != "cli_test" {
 		t.Fatalf("appID=%q, want cli_test", got.larkConfigBindAppID)
+	}
+	view := got.View()
+	if !strings.Contains(view, "lark-cli config init") || !strings.Contains(view, "--app-id cli_test") || !strings.Contains(view, "--app-secret") {
+		t.Fatalf("view should show manual OpenClaw-side config init command: %q", view)
+	}
+	if !strings.Contains(view, "lark-cli config bind") || !strings.Contains(view, "--source openclaw") || !strings.Contains(view, "--identity bot-only") {
+		t.Fatalf("view should also show lark-cli config bind --source openclaw command: %q", view)
+	}
+	if strings.Contains(view, "LARKSUITE_CLI_CONFIG_DIR=") {
+		t.Fatalf("bot login command should use OpenClaw user's default ~/.lark-cli config: %q", view)
+	}
+	if !strings.Contains(view, "~/.lark-cli/openclaw/config.json") {
+		t.Fatalf("view should reference the openclaw workspace lark-cli config path: %q", view)
+	}
+	if !strings.Contains(view, "app_secret") || !strings.Contains(view, "发给 Termind") || !strings.Contains(view, "agent") {
+		t.Fatalf("view should keep app_secret out of Termind/agent: %q", view)
 	}
 }
 

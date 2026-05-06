@@ -37,10 +37,11 @@ func TestLarkCLIStatus_UsesAgentFlowAndParsesStatus(t *testing.T) {
 }
 
 func TestBuildLarkCLIStatusPromptUsesSplitFastChecks(t *testing.T) {
-	prompt := buildLarkCLIStatusPrompt()
+	prompt := buildLarkCLIStatusPrompt("/tmp/termind-lark-cli")
 	for _, want := range []string{
 		"termind_lark_cli_exists",
 		"termind_lark_cli_login_status",
+		"/tmp/termind-lark-cli",
 		"bot app active profile is valid",
 		"Stop early",
 	} {

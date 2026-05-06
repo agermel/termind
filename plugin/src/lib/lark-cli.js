@@ -22,7 +22,8 @@ export function buildLarkCliCommands(event, card) {
 }
 
 function larkCliCommandForTarget(event, target, card) {
-  const args = [];
+  const profile = String(event.larkCliProfile || target.profile || "").trim();
+  const args = profileArgs(profile);
   args.push("im", "+messages-send", "--as", event.larkSender || "bot", "--content", JSON.stringify(card), "--msg-type", "interactive");
   if (target.type === "chat") {
     args.push("--chat-id", target.id);
@@ -50,7 +51,9 @@ function larkRouteCommandsForEvent(event, card) {
     const identity = identities[identityId] && typeof identities[identityId] === "object" ? identities[identityId] : {};
     const sender = normalizeSender(identity.kind || route.sender || event.larkSender);
     const configDir = String(identity.larkCliConfigDir || route.larkCliConfigDir || "").trim();
-    const args = ["im", "+messages-send", "--as", sender, "--content", JSON.stringify(card), "--msg-type", "interactive"];
+    const profile = String(identity.profile || route.profile || "").trim();
+    const args = profileArgs(profile);
+    args.push("im", "+messages-send", "--as", sender, "--content", JSON.stringify(card), "--msg-type", "interactive");
     if (target.type === "chat") {
       args.push("--chat-id", target.id);
     } else {
@@ -87,9 +90,21 @@ function optionalEnv(configDir) {
   return configDir ? { LARKSUITE_CLI_CONFIG_DIR: configDir } : {};
 }
 
+function profileArgs(profile) {
+  return profile ? ["--profile", profile] : [];
+}
+
 function commandDisplay(command, args, configDir) {
   const body = [command, ...args.map(shellQuote)].join(" ");
-  return configDir ? "LARKSUITE_CLI_CONFIG_DIR=" + shellQuote(configDir) + " " + body : body;
+  return configDir ? "LARKSUITE_CLI_CONFIG_DIR=" + shellEnvValue(configDir) + " " + body : body;
+}
+
+function shellEnvValue(value) {
+  const s = String(value ?? "").trim();
+  if (s.startsWith("$HOME/")) {
+    return "\"$HOME/" + s.slice("$HOME/".length).replaceAll("\\", "\\\\").replaceAll("\"", "\\\"").replaceAll("`", "\\`") + "\"";
+  }
+  return shellQuote(s);
 }
 
 function shellQuote(value) {

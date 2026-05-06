@@ -114,6 +114,7 @@ type LarkTargetSearchRequest struct {
 	Query            string `json:"query,omitempty"`
 	MemberOpenID     string `json:"memberOpenID,omitempty"`
 	LarkCLIConfigDir string `json:"larkCliConfigDir,omitempty"`
+	Profile          string `json:"profile,omitempty"`
 }
 
 type LarkTargetSearchResult struct {
@@ -145,9 +146,9 @@ type LarkTargetTestEntry struct {
 	Error  string     `json:"error,omitempty"`
 }
 
-func (c *Client) LarkCLIStatus(ctx context.Context) (*LarkCLIStatus, error) {
+func (c *Client) LarkCLIStatus(ctx context.Context, configDir ...string) (*LarkCLIStatus, error) {
 	sessionKey := larkCLIStatusSessionKey + ":" + randomHex(8)
-	messages, startedAt, err := c.runLarkAgentSession(ctx, sessionKey, larkCLIStatusLabel, buildLarkCLIStatusPrompt(), 32)
+	messages, startedAt, err := c.runLarkAgentSession(ctx, sessionKey, larkCLIStatusLabel, buildLarkCLIStatusPrompt(firstVariadicString(configDir)), 32)
 	if err != nil {
 		return nil, err
 	}
@@ -299,17 +300,20 @@ func (c *Client) runLarkAgentSessionWithTimeout(ctx context.Context, sessionKey 
 	return sess.Messages, startedAt, nil
 }
 
-func buildLarkCLIStatusPrompt() string {
+func buildLarkCLIStatusPrompt(configDir string) string {
+	payload, _ := json.Marshal(map[string]string{"larkCliConfigDir": strings.TrimSpace(configDir)})
 	return strings.Join([]string{
 		"Use the Termind split lark-cli check tools to inspect lark-cli on the OpenClaw host quickly.",
 		"Do not use local Termind-side lark-cli. Do not reveal tokens, app secrets, cookies, or credential file contents.",
+		"Input JSON: " + string(payload),
+		"If larkCliConfigDir is empty, do not set LARKSUITE_CLI_CONFIG_DIR; use the OpenClaw exec user's default ~/.lark-cli/config.json.",
 		"Run each check only if the previous check says to continue. Stop early when a required check fails.",
 		"Let OpenClaw-side lark-cli use its active profile. Do not pass or persist a Termind-side profile.",
 		"A bot app active profile is valid for Termind readiness. Do not require user contact API authorization for readiness.",
 		"Steps:",
-		"1. Call termind_lark_cli_exists with {\"action\":\"plan\"}. Execute exactly its returned command with OpenClaw exec. Call termind_lark_cli_exists with {\"action\":\"parse\"} and the exec stdout/stderr/exitCode. If installed is false, reply immediately with its status JSON.",
-		"2. Call termind_lark_cli_login_status with {\"action\":\"plan\"}. Execute exactly its returned command with OpenClaw exec. Call termind_lark_cli_login_status with {\"action\":\"parse\"} and the exec stdout/stderr/exitCode. If loggedIn is false, reply immediately with its status JSON.",
-		"3. Optionally call termind_lark_cli_doctor_status with {\"action\":\"plan\"} only after the previous checks pass. Execute exactly its returned command with OpenClaw exec and parse it.",
+		"1. Call termind_lark_cli_exists with {\"action\":\"plan\"} plus the input JSON. Execute exactly its returned command with OpenClaw exec. Call termind_lark_cli_exists with {\"action\":\"parse\"} and the exec stdout/stderr/exitCode. If installed is false, reply immediately with its status JSON.",
+		"2. Call termind_lark_cli_login_status with {\"action\":\"plan\"} plus the input JSON. Execute exactly its returned command with OpenClaw exec. Call termind_lark_cli_login_status with {\"action\":\"parse\"} and the exec stdout/stderr/exitCode. If loggedIn is false, reply immediately with its status JSON.",
+		"3. Optionally call termind_lark_cli_doctor_status with {\"action\":\"plan\"} plus the input JSON only after the previous checks pass. Execute exactly its returned command with OpenClaw exec and parse it.",
 		"4. Reply with exactly one JSON object and no Markdown. Include installed, ready, profile, profiles, doctor, auth, and errors fields.",
 	}, "\n")
 }

@@ -267,7 +267,7 @@ export default definePluginEntry({
 
     api.registerTool({
       name: "termind_lark_cli_config_init",
-      description: "Report that Direct app_secret lark-cli config init is unsupported in the current OpenClaw Gateway because no secure stdin exec primitive is exposed.",
+      description: "Build a manual OpenClaw-side lark-cli bot config init command using --app-secret-stdin. This tool never receives app_secret and does not execute shell commands.",
       parameters: larkCliCheckSchema,
       async execute(_callId, params) {
         return jsonContent(larkCliConfigInitTool(params));
@@ -297,6 +297,7 @@ export default definePluginEntry({
           memberOpenID: { type: "string" },
           larkCliConfigDir: { type: "string" },
           configDir: { type: "string" },
+          profile: { type: "string" },
           chatSearchOutput: { type: "string" },
           chatSearchError: { type: "string" },
           chatListOutput: { type: "string" },

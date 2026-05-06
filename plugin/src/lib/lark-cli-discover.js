@@ -10,34 +10,38 @@ export function buildLarkCliDiscoverPlan(params = {}) {
   const query = text(params.query);
   const memberOpenID = text(params.memberOpenID);
   const configDir = text(params.larkCliConfigDir ?? params.configDir);
+  const profile = text(params.profile);
   const commands = [];
   if (kind === "chat") {
     if (query || (sender === "user" && memberOpenID)) {
+      const args = larkCliArgs(profile, ["im", "+chat-search", "--as", sender, "--format", "json", ...optionalArg("--query", query), ...optionalArg("--member-ids", sender === "user" ? memberOpenID : "")]);
       commands.push({
         key: "chatSearch",
         command: "lark-cli",
-        args: ["im", "+chat-search", "--as", sender, "--format", "json", ...optionalArg("--query", query), ...optionalArg("--member-ids", sender === "user" ? memberOpenID : "")],
+        args,
         env: optionalEnv(configDir),
-        display: commandDisplay("lark-cli", ["im", "+chat-search", "--as", sender, "--format", "json", ...optionalArg("--query", query), ...optionalArg("--member-ids", sender === "user" ? memberOpenID : "")], configDir),
+        display: commandDisplay("lark-cli", args, configDir),
         optional: false
       });
     } else {
+      const args = larkCliArgs(profile, ["im", "chats", "list", "--as", sender, "--format", "json", "--page-all", "--page-limit", "50"]);
       commands.push({
         key: "chatList",
         command: "lark-cli",
-        args: ["im", "chats", "list", "--as", sender, "--format", "json", "--page-all", "--page-limit", "50"],
+        args,
         env: optionalEnv(configDir),
-        display: commandDisplay("lark-cli", ["im", "chats", "list", "--as", sender, "--format", "json", "--page-all", "--page-limit", "50"], configDir),
+        display: commandDisplay("lark-cli", args, configDir),
         optional: false
       });
     }
   } else {
+    const args = larkCliArgs(profile, ["contact", "+search-user", "--as", sender, "--format", "json", ...optionalArg("--query", query)]);
     commands.push({
       key: "userSearch",
       command: "lark-cli",
-      args: ["contact", "+search-user", "--as", sender, "--format", "json", ...optionalArg("--query", query)],
+      args,
       env: optionalEnv(configDir),
-      display: commandDisplay("lark-cli", ["contact", "+search-user", "--as", sender, "--format", "json", ...optionalArg("--query", query)], configDir),
+      display: commandDisplay("lark-cli", args, configDir),
       optional: false
     });
   }
@@ -45,6 +49,7 @@ export function buildLarkCliDiscoverPlan(params = {}) {
     version: 1,
     sideEffects: false,
     kind,
+    profile,
     larkCliConfigDir: configDir,
     execTool: "exec",
     commands,
@@ -78,13 +83,25 @@ function optionalArg(name, value) {
   return value ? [name, value] : [];
 }
 
+function larkCliArgs(profile, args) {
+  return profile ? ["--profile", profile, ...args] : args;
+}
+
 function optionalEnv(configDir) {
   return configDir ? { LARKSUITE_CLI_CONFIG_DIR: configDir } : {};
 }
 
 function commandDisplay(command, args, configDir) {
   const body = [command, ...args.map(shellQuote)].join(" ");
-  return configDir ? "LARKSUITE_CLI_CONFIG_DIR=" + shellQuote(configDir) + " " + body : body;
+  return configDir ? "LARKSUITE_CLI_CONFIG_DIR=" + shellEnvValue(configDir) + " " + body : body;
+}
+
+function shellEnvValue(value) {
+  value = text(value);
+  if (value.startsWith("$HOME/")) {
+    return "\"$HOME/" + value.slice("$HOME/".length).replaceAll("\\", "\\\\").replaceAll("\"", "\\\"").replaceAll("`", "\\`") + "\"";
+  }
+  return shellQuote(value);
 }
 
 function normalizeKind(value) {

@@ -275,19 +275,40 @@ export function larkCliConfigInitTool(params = {}) {
   const brand = normalizeBrand(params.brand);
   const configDir = text(params.larkCliConfigDir ?? params.configDir);
   if (action === "plan") {
+    const command = appId ? prefixLarkCliCommand(configDir, "lark-cli config init --app-id " + shellQuote(appId) + " --brand " + shellQuote(brand) + " --app-secret-stdin") : "";
     return {
       version: 1,
       check: "config_init",
-      ok: false,
+      ok: Boolean(appId),
       appId,
       profile,
       brand,
       larkCliConfigDir: configDir,
-      command: "",
+      command,
       commands: [],
+      manual: true,
+      sideEffects: true,
       stop: true,
-      requiresSecretInput: false,
-      errors: ["Direct app_secret config init is unsupported in the current OpenClaw Gateway: no secure stdin exec primitive is exposed."]
+      requiresSecretInput: Boolean(appId),
+      errors: appId ? [] : ["appId is required"]
+    };
+  }
+  if (action === "parse") {
+    const stdout = execStdout(params);
+    const stderr = execStderr(params);
+    const exitCode = numberOrNull(params.exitCode);
+    const output = text(stdout + "\n" + stderr);
+    const ok = exitCode === null ? !looksLikeFailure(output) : exitCode === 0;
+    return {
+      version: 1,
+      check: "config_init",
+      ok,
+      appId,
+      profile,
+      brand,
+      larkCliConfigDir: configDir,
+      output: firstLine(output),
+      errors: ok ? [] : [firstLine(output) || "lark-cli config init failed"]
     };
   }
   return {
@@ -299,7 +320,7 @@ export function larkCliConfigInitTool(params = {}) {
     brand,
     larkCliConfigDir: configDir,
     output: "",
-    errors: [`unsupported action: ${action}; Direct app_secret config init is unavailable in the current OpenClaw Gateway`]
+    errors: [`unsupported action: ${action}`]
   };
 }
 
@@ -556,7 +577,15 @@ function shellQuote(value) {
 function prefixLarkCliCommand(configDir, command) {
   configDir = text(configDir);
   if (!configDir) return command;
-  return "LARKSUITE_CLI_CONFIG_DIR=" + shellQuote(configDir) + " " + command;
+  return "LARKSUITE_CLI_CONFIG_DIR=" + shellEnvValue(configDir) + " " + command;
+}
+
+function shellEnvValue(value) {
+  value = text(value);
+  if (value.startsWith("$HOME/")) {
+    return "\"$HOME/" + value.slice("$HOME/".length).replaceAll("\\", "\\\\").replaceAll("\"", "\\\"").replaceAll("`", "\\`") + "\"";
+  }
+  return shellQuote(value);
 }
 
 function normalizedAction(params) {

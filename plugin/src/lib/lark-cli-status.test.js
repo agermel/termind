@@ -121,13 +121,15 @@ test("termind_lark_cli_config_bind plans and parses existing OpenClaw bot bind",
   assert.deepEqual(parsed.errors, []);
 });
 
-test("termind_lark_cli_config_init reports direct app_secret unsupported", () => {
+test("termind_lark_cli_config_init builds manual OpenClaw-side bot init command", () => {
   const plan = larkCliConfigInitTool({ action: "plan", appId: "cli_a97d19e27838dcb6" });
 
-  assert.equal(plan.ok, false);
-  assert.equal(plan.command, "");
+  assert.equal(plan.ok, true);
+  assert.equal(plan.manual, true);
+  assert.equal(plan.requiresSecretInput, true);
+  assert.equal(plan.command, "lark-cli config init --app-id cli_a97d19e27838dcb6 --brand feishu --app-secret-stdin");
   assert.deepEqual(plan.commands, []);
-  assert.match(plan.errors[0], /unsupported/);
+  assert.deepEqual(plan.errors, []);
 });
 
 test("termind_lark_cli_auth_login plans and parses OpenClaw-side device flow", () => {

@@ -16,9 +16,11 @@ import (
 )
 
 type larkTargetChoice struct {
-	Type  string
-	ID    string
-	Label string
+	Type    string
+	ID      string
+	Label   string
+	Profile string
+	AppID   string
 }
 
 var termindOpenClawAllowedTools = []string{
@@ -31,6 +33,7 @@ var termindOpenClawAllowedTools = []string{
 	"termind_lark_cli_discover",
 	"termind_lark_cli_auth_login",
 	"termind_lark_cli_config_bind",
+	"termind_lark_cli_config_init",
 	"termind_lark_cli_doctor_status",
 	"termind_lark_cli_exists",
 	"termind_lark_cli_identity_status",
