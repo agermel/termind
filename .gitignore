@@ -9,3 +9,5 @@ cli/debug.log
 
 # macOS
 .DS_Store
+termind-plugin/CLI_INTEGRATION.md
+termind-plugin/INSTALL.md

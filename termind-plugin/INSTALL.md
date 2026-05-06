@@ -24,11 +24,11 @@ openclaw gateway start
 
 ```bash
 # 从本地路径安装
-openclaw plugins install /path/to/termind-pulgin --force
+openclaw plugins install /path/to/termind-plugin --force
 
 # 如果已安装旧版，先卸载
 openclaw plugins uninstall termind
-openclaw plugins install /path/to/termind-pulgin
+openclaw plugins install /path/to/termind-plugin
 ```
 
 ### 3. 启用插件
@@ -88,13 +88,14 @@ registered 5 safe Termind tools (all optional): event_redact, fingerprint_comput
 | `termind-lark-alert` | 编排卡片发送流程（脱敏→指纹→分类→卡片→lark-cli 发送） |
 | `termind-knowledge-rag` | 知识检索（按指纹/摘要/堆栈搜索历史） |
 | `termind-incident-report` | 事件报告生成（脱敏→指纹→报告模板） |
+| `termind-wiki-bootstrap` | 项目文档初始化（GitHub 分析→飞书知识库生成 5 类文档） |
 
 ## 测试
 
 ### 单元测试
 
 ```bash
-cd /path/to/termind-pulgin
+cd /path/to/termind-plugin
 npm install
 npm test
 ```
@@ -127,6 +128,19 @@ openclaw agent --local --agent main \
 }
 ```' \
   --timeout 120
+```
+
+### 集成测试（模拟 CLI 项目文档初始化路径）
+
+```bash
+openclaw agent --local --agent main \
+  --session-id termind-test-wiki-bootstrap \
+  --message 'Use the termind-wiki-bootstrap skill.
+
+项目地址：https://github.com/user/repo
+请为该项目生成飞书知识库文档。
+```' \
+  --timeout 300
 ```
 
 ## 卸载

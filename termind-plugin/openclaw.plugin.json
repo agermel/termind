@@ -22,6 +22,7 @@
   "skills": [
     "./skills/termind-lark-alert",
     "./skills/termind-knowledge-rag",
-    "./skills/termind-incident-report"
+    "./skills/termind-incident-report",
+    "./skills/termind-wiki-bootstrap"
   ]
 }
