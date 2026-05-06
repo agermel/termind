@@ -432,8 +432,11 @@ func TestLarkInitModelBotLoginAppIDShowsOpenClawManualCommand(t *testing.T) {
 	if !strings.Contains(view, "lark-cli config init") || !strings.Contains(view, "--app-id cli_test") || !strings.Contains(view, "--app-secret") {
 		t.Fatalf("view should show manual OpenClaw-side config init command: %q", view)
 	}
-	if !strings.Contains(view, "lark-cli config bind") || !strings.Contains(view, "--source openclaw") || !strings.Contains(view, "--identity bot-only") {
-		t.Fatalf("view should also show lark-cli config bind --source openclaw command: %q", view)
+	if !strings.Contains(view, "cp ") || !strings.Contains(view, "$HOME/.lark-cli/config.json") || !strings.Contains(view, "$HOME/.lark-cli/openclaw/config.json") {
+		t.Fatalf("view should show cp-based sync command from local workspace into openclaw workspace: %q", view)
+	}
+	if strings.Contains(view, "lark-cli config bind") {
+		t.Fatalf("view should no longer reference lark-cli config bind: %q", view)
 	}
 	if strings.Contains(view, "LARKSUITE_CLI_CONFIG_DIR=") {
 		t.Fatalf("bot login command should use OpenClaw user's default ~/.lark-cli config: %q", view)
@@ -832,6 +835,152 @@ func assertPlainLineMax(t *testing.T, value string, max int) {
 		if len([]rune(line)) > max {
 			t.Fatalf("line too long: len=%d max=%d line=%q", len([]rune(line)), max, line)
 		}
+	}
+}
+
+func TestRenderLarkBotLogin_CommandsCopyableOutsideCard(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := newLarkInitModel(ctx, cancel, strings.NewReader(""), &bytes.Buffer{}, &config.Config{}, "ws://127.0.0.1:18789/v1/gateway", true)
+	m.larkConfigBindAppID = "cli_test123"
+	m.step = larkStepLarkBotLoginInstruction
+
+	plain := plainANSI(m.View())
+
+	// shellQuote 对纯字母数字 + 下划线的输入不会加引号。
+	initWant := "lark-cli config init --app-id cli_test123 --brand feishu --app-secret-stdin"
+	syncWant := `cp "$HOME/.lark-cli/config.json" "$HOME/.lark-cli/openclaw/config.json"`
+	mkdirWant := `mkdir -p "$HOME/.lark-cli/openclaw"`
+	if !strings.Contains(plain, initWant) {
+		t.Fatalf("view should contain init command verbatim: not found in %q", plain)
+	}
+	if !strings.Contains(plain, syncWant) {
+		t.Fatalf("view should contain cp sync command verbatim: not found in %q", plain)
+	}
+	if !strings.Contains(plain, mkdirWant) {
+		t.Fatalf("view should contain mkdir command verbatim: not found in %q", plain)
+	}
+
+	for _, line := range strings.Split(plain, "\n") {
+		if !strings.Contains(line, "lark-cli config") && !strings.Contains(line, "cp ") && !strings.Contains(line, "mkdir ") {
+			continue
+		}
+		// 命令行不应该被 lipgloss 卡片边框 `│` 包夹,否则三击复制会带边框。
+		if strings.ContainsAny(line, "│╭╮╰╯") {
+			t.Fatalf("command line should not be wrapped in card border: %q", line)
+		}
+		// 也不应该被卡片 padding 补到 86 列产生尾部空格。
+		if strings.TrimRight(line, " ") != line {
+			t.Fatalf("command line should not have trailing padding spaces: %q", line)
+		}
+	}
+}
+
+func TestRenderLarkAuthLoginWaiting_URLAndCodeCopyableOutsideCard(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := newLarkInitModel(ctx, cancel, strings.NewReader(""), &bytes.Buffer{}, &config.Config{}, "ws://127.0.0.1:18789/v1/gateway", true)
+	m.step = larkStepLocalAuthLoginWaiting
+	m.larkLoginURL = "https://passport.feishu.cn/device"
+	m.larkLoginUserCode = "ABC-123"
+
+	plain := plainANSI(m.View())
+
+	if !strings.Contains(plain, "https://passport.feishu.cn/device") {
+		t.Fatalf("view should contain auth URL: %q", plain)
+	}
+	if !strings.Contains(plain, "ABC-123") {
+		t.Fatalf("view should contain user code: %q", plain)
+	}
+
+	for _, line := range strings.Split(plain, "\n") {
+		switch {
+		case strings.Contains(line, "https://passport.feishu.cn"), strings.Contains(line, "ABC-123") && !strings.Contains(line, "验证码:"):
+			if strings.ContainsAny(line, "│╭╮╰╯") {
+				t.Fatalf("copyable line should not be wrapped in card border: %q", line)
+			}
+			if strings.TrimRight(line, " ") != line {
+				t.Fatalf("copyable line should not have trailing padding spaces: %q", line)
+			}
+		}
+	}
+}
+
+func TestStepProgress_AllStepsMappedCorrectly(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := newLarkInitModel(ctx, cancel, strings.NewReader(""), &bytes.Buffer{}, &config.Config{}, "ws://127.0.0.1:18789/v1/gateway", true)
+
+	cases := []struct {
+		step larkInitStep
+		want int
+		name string
+	}{
+		// 1: 启用
+		{larkStepEnable, 1, "Enable"},
+		// 2: OpenClaw 插件 / tools / approvals / 远程
+		{larkStepLocalInstallPlugin, 2, "LocalInstallPlugin"},
+		{larkStepLocalToolsAllow, 2, "LocalToolsAllow"},
+		{larkStepRemoteSSH, 2, "RemoteSSH"},
+		// 3: lark-cli doctor / 安装 / 登录
+		{larkStepCheckingDoctor, 3, "CheckingDoctor"},
+		{larkStepLocalInstallLarkCLI, 3, "LocalInstallLarkCLI"},
+		{larkStepLarkBotLoginInstruction, 3, "LarkBotLoginInstruction"},
+		{larkStepLocalAuthLoginWaiting, 3, "LocalAuthLoginWaiting"},
+		// 4: Profile - identity sources / bot 选择 / oauth / profile use
+		{larkStepIdentitySources, 4, "IdentitySources"},
+		{larkStepLoadingOpenClawBotAccounts, 4, "LoadingOpenClawBotAccounts"},
+		{larkStepSelectOpenClawBots, 4, "SelectOpenClawBots"},
+		{larkStepConfiguringIdentity, 4, "ConfiguringIdentity"},
+		{larkStepUserOAuthAppChoice, 4, "UserOAuthAppChoice"},
+		{larkStepUserOAuthLabel, 4, "UserOAuthLabel"},
+		{larkStepUserOAuthConfiguring, 4, "UserOAuthConfiguring"},
+		{larkStepProfileChoice, 4, "ProfileChoice"},
+		{larkStepSwitchingProfile, 4, "SwitchingProfile"},
+		// 5: 目标 - identity-chat / 关键字搜索 / 多选 / 手动添加
+		{larkStepForwardIdentitySelect, 5, "ForwardIdentitySelect"},
+		{larkStepLoadingIdentityChats, 5, "LoadingIdentityChats"},
+		{larkStepSelectIdentityChats, 5, "SelectIdentityChats"},
+		{larkStepSavingOpenClawConfig, 5, "SavingOpenClawConfig"},
+		{larkStepKeepExisting, 5, "KeepExisting"},
+		{larkStepAddSelf, 5, "AddSelf"},
+		{larkStepSearchChats, 5, "SearchChats"},
+		{larkStepSelectChats, 5, "SelectChats"},
+		{larkStepSelectUsers, 5, "SelectUsers"},
+		{larkStepManualPersonType, 5, "ManualPersonType"},
+		// 6: 测试
+		{larkStepTestTargets, 6, "TestTargets"},
+		{larkStepTestingTargets, 6, "TestingTargets"},
+		// 7: 完成
+		{larkStepFinish, 7, "Finish"},
+	}
+
+	for _, tc := range cases {
+		m.step = tc.step
+		if got := m.stepProgress(); got != tc.want {
+			t.Errorf("stepProgress(%s)=%d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestStepProgress_SelectOpenClawBotsHighlightsProfile(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := newLarkInitModel(ctx, cancel, strings.NewReader(""), &bytes.Buffer{}, &config.Config{}, "ws://127.0.0.1:18789/v1/gateway", true)
+	m.step = larkStepSelectOpenClawBots
+
+	plain := plainANSI(m.View())
+	// "Profile" 应该是当前 step,前面的 "OpenClaw" 和 "lark-cli" 已经过去(打勾或 active 都行,
+	// 但绝对不应该是 "1 启用" 高亮)。最直观的检查: stepProgress() 必须 == 4。
+	if got := m.stepProgress(); got != 4 {
+		t.Fatalf("stepProgress on SelectOpenClawBots = %d, want 4 (Profile)", got)
+	}
+	// 进度条必须包含 "4 Profile" 和 "✓ 启用"(因为 1 < 4)。
+	if !strings.Contains(plain, "4 Profile") {
+		t.Fatalf("progress bar missing 4 Profile: %q", plain)
+	}
+	if !strings.Contains(plain, "✓ 启用") {
+		t.Fatalf("progress bar should show 启用 as completed (✓): %q", plain)
 	}
 }
 

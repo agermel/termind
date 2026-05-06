@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -70,14 +71,66 @@ func runInit(cmd *cobra.Command, _ []string) error {
 	ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt)
 	defer cancel()
 
+	snap := snapshotInitState()
 	if err := runInitWithContext(ctx, cmd); err != nil {
+		rolledBack := rollbackInitState(snap)
 		if errors.Is(err, context.Canceled) {
 			fmt.Fprintln(cmd.OutOrStdout(), "已取消 init。")
+			if rolledBack {
+				fmt.Fprintln(cmd.OutOrStdout(), "已回退本次 init 写入的中间状态;再次运行 termind 时会重新进入 init 流程。")
+			}
 			return errInitCancelled
 		}
 		return err
 	}
 	return nil
+}
+
+// initStateSnapshot 记录 init 启动前 ~/.config/termind/ 的关键状态,
+// 用于在 init 中途失败/取消时回退,避免遗留半成品配置导致下次启动跳过 init。
+type initStateSnapshot struct {
+	dir              string
+	dirExistedBefore bool
+	wasConfigured    bool
+}
+
+func snapshotInitState() initStateSnapshot {
+	snap := initStateSnapshot{}
+	dir, err := config.Dir()
+	if err != nil || dir == "" {
+		return snap
+	}
+	snap.dir = dir
+	if _, err := os.Stat(dir); err == nil {
+		snap.dirExistedBefore = true
+	}
+	if cfg, err := config.Load(); err == nil && cfg != nil && strings.TrimSpace(cfg.ServerURL) != "" {
+		snap.wasConfigured = true
+	}
+	return snap
+}
+
+// rollbackInitState 把 ~/.config/termind/ 还原到 init 启动前。
+//
+// 仅在 init 启动前用户尚未配置(cfg.ServerURL 为空)时才回退,避免重新跑 init
+// 的用户被误删现有配置。返回是否真的执行了回退,便于上层决定是否提示用户。
+func rollbackInitState(snap initStateSnapshot) bool {
+	if snap.dir == "" || snap.wasConfigured {
+		return false
+	}
+	if !snap.dirExistedBefore {
+		if err := os.RemoveAll(snap.dir); err != nil {
+			return false
+		}
+		return true
+	}
+	rolledBack := false
+	for _, name := range []string{"config.json", "device-auth.json", "token"} {
+		if err := os.Remove(filepath.Join(snap.dir, name)); err == nil {
+			rolledBack = true
+		}
+	}
+	return rolledBack
 }
 
 func runInitWithContext(ctx context.Context, cmd *cobra.Command) error {

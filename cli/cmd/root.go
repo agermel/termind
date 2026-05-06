@@ -32,6 +32,7 @@ var rootCmd = &cobra.Command{
 子命令:
   shell           进入 PTY 包装的交互式 shell
   init            配置 shell integration 并连接 OpenClaw
+  select chat     已配置后,直接重新选择 Lark 转发的群聊/个人目标
   status          只读展示身份 / 配对 / integration 状态
 
 模块进度:

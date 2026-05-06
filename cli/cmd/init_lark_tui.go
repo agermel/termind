@@ -245,6 +245,75 @@ func runLarkInitBubbleTea(ctx context.Context, in io.Reader, out io.Writer, open
 	return nil
 }
 
+// runLarkSelectChatTUI 跳过 OpenClaw / lark-cli / Profile 步骤,直接进入目标选择。
+//
+// 调用方负责验证 cfg.ServerURL 非空、cfg.Lark.Forwarding.Identities 至少有一项;
+// 这里只做 UI 展示和写盘。已有的 Identities/Routes 会原样保留下来,saveConfig
+// 阶段不会因为本次只动 Targets 而把它们清空。
+func runLarkSelectChatTUI(ctx context.Context, in io.Reader, out io.Writer, openClawGatewayURL string, cfg *config.Config) error {
+	if cfg == nil {
+		return errors.New("config is nil")
+	}
+	tuiCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	localOpenClaw := isLocalOpenClawGatewayURL(openClawGatewayURL)
+	model := newLarkInitModel(tuiCtx, cancel, in, out, cfg, openClawGatewayURL, localOpenClaw)
+
+	// 预填已绑定的 Lark 身份,saveConfig 时按原样写回。
+	for id, identity := range cfg.Lark.Forwarding.Identities {
+		model.identities[id] = diagnose.LarkForwardingIdentity{
+			ID:               identity.ID,
+			Kind:             identity.Kind,
+			Label:            identity.Label,
+			AppID:            identity.AppID,
+			UserOpenID:       identity.UserOpenID,
+			Profile:          identity.Profile,
+			LarkCLIConfigDir: identity.LarkCLIConfigDir,
+			Source:           identity.Source,
+			Slot:             identity.Slot,
+			Enabled:          identity.Enabled,
+		}
+		model.identityOrder = append(model.identityOrder, id)
+	}
+	// 预填已有 Routes,避免 saveConfig 时被清空。
+	for _, route := range cfg.Lark.Forwarding.Routes {
+		model.routes = append(model.routes, diagnose.LarkForwardingRoute{
+			IdentityID: route.IdentityID,
+			Target: diagnose.LarkTarget{
+				Type:    route.Target.Type,
+				ID:      route.Target.ID,
+				Label:   route.Target.Label,
+				Enabled: route.Target.Enabled,
+			},
+			Enabled: route.Enabled,
+		})
+	}
+	// 跳过本机 OpenClaw 自动配置触发(prepareLocalOpenClawSetup 之类)。
+	model.openClawSetupDone = true
+
+	// 起步直接进入"目标"步骤: 保留现有 → 加自己 → 搜索群聊。
+	initialModel, _ := model.prepareKeepExisting()
+	initial, ok := initialModel.(*larkInitModel)
+	if !ok {
+		return errors.New("prepareKeepExisting returned unexpected model")
+	}
+
+	program := tea.NewProgram(initial, initTUIProgramOptions(in, out)...)
+	finalModel, err := program.Run()
+	if err != nil {
+		return err
+	}
+	m, ok := finalModel.(*larkInitModel)
+	if !ok {
+		return errors.New("lark select chat tui returned unexpected model")
+	}
+	if m.err != nil {
+		return m.err
+	}
+	return nil
+}
+
 func newLarkInitModel(ctx context.Context, cancel context.CancelFunc, in io.Reader, out io.Writer, cfg *config.Config, openClawGatewayURL string, localOpenClaw bool) *larkInitModel {
 	input := textinput.New()
 	input.Width = 72
@@ -1134,8 +1203,19 @@ func larkBotConfigInitCommand(appID string, configDir string) string {
 	}, "\n")
 }
 
-func larkBotConfigBindCommand(appID string) string {
-	return "lark-cli config bind --source openclaw --app-id " + shellQuote(strings.TrimSpace(appID)) + " --identity bot-only"
+func larkBotConfigSyncCommand(configDir string) string {
+	configDir = strings.TrimSpace(configDir)
+	if configDir == "" {
+		return strings.Join([]string{
+			`mkdir -p "$HOME/.lark-cli/openclaw"`,
+			`cp "$HOME/.lark-cli/config.json" "$HOME/.lark-cli/openclaw/config.json"`,
+		}, "\n")
+	}
+	base := strings.TrimRight(configDir, "/")
+	return strings.Join([]string{
+		"mkdir -p " + shellEnvValue(base+"/openclaw"),
+		"cp " + shellEnvValue(base+"/config.json") + " " + shellEnvValue(base+"/openclaw/config.json"),
+	}, "\n")
 }
 
 func shellEnvValue(value string) string {
@@ -1739,7 +1819,7 @@ func (m *larkInitModel) View() string {
 	case larkStepLarkConfigBindAppID:
 		body = m.renderInput("新增 lark-cli bot profile", "输入 Lark/Feishu App ID（cli_xxx）。Termind 只生成 OpenClaw 端登录命令，不接收 app_secret。")
 	case larkStepLarkConfigBinding:
-		body = m.renderLoading("绑定 OpenClaw lark-cli bot profile", "正在通过 OpenClaw exec 执行 lark-cli config bind --source openclaw --identity bot-only")
+		body = m.renderLoading("同步 OpenClaw lark-cli bot profile", "正在通过 OpenClaw exec 把 lark-cli local workspace 配置复制到 openclaw workspace")
 	case larkStepLarkBotLoginInstruction:
 		body = m.renderLarkBotLoginInstruction()
 	case larkStepLocalAuthLogin:
@@ -1828,6 +1908,11 @@ func (m *larkInitModel) View() string {
 	b.WriteString(m.renderProgress())
 	b.WriteString("\n\n")
 	b.WriteString(initTUICardStyle.Width(86).Render(body))
+	if extra := strings.TrimRight(m.bodyPostCard(), "\n"); extra != "" {
+		b.WriteString("\n\n")
+		b.WriteString(extra)
+		b.WriteString("\n")
+	}
 	if m.errorText != "" && m.step != larkStepDoctorFailed {
 		b.WriteString("\n")
 		b.WriteString(initTUIErrorStyle.Render("✗ " + m.errorText))
@@ -1908,6 +1993,22 @@ func (m *larkInitModel) renderLoading(title string, detail string) string {
 	}, "\n")
 }
 
+// bodyPostCard 返回需要渲染在卡片(initTUICardStyle)下方的纯文本内容。
+//
+// 卡片本身依赖 lipgloss 的 Border + Width(86) 来画外框,会导致每行被补齐到固定
+// 宽度并加上 │ 字符。当用户用三击/拖选复制时会把边框和尾部空格一起带走,影响
+// 命令/链接/验证码的可粘贴性。把这些"必须可整行复制"的内容拆到卡片外面渲染,
+// 终端选区就只覆盖到真实文本。
+func (m *larkInitModel) bodyPostCard() string {
+	switch m.step {
+	case larkStepLarkBotLoginInstruction:
+		return m.renderLarkBotLoginCommands()
+	case larkStepLocalAuthLoginWaiting:
+		return m.renderLarkAuthLoginCommands()
+	}
+	return ""
+}
+
 func (m *larkInitModel) renderLarkAuthLoginWaiting() string {
 	lines := []string{
 		initTUIAccentStyle.Render("等待 OpenClaw lark-cli 浏览器授权"),
@@ -1917,11 +2018,8 @@ func (m *larkInitModel) renderLarkAuthLoginWaiting() string {
 	if msg := strings.TrimSpace(m.larkLoginMessage); msg != "" {
 		lines = append(lines, msg)
 	}
-	if url := strings.TrimSpace(m.larkLoginURL); url != "" {
-		lines = append(lines, "授权链接: "+url)
-	}
-	if code := strings.TrimSpace(m.larkLoginUserCode); code != "" {
-		lines = append(lines, "验证码: "+initTUISelectedStyle.Render(code))
+	if strings.TrimSpace(m.larkLoginURL) != "" || strings.TrimSpace(m.larkLoginUserCode) != "" {
+		lines = append(lines, initTUISubtleStyle.Render("授权链接和验证码在卡片下方,可直接复制。"))
 	}
 	if m.larkLoginExpiresIn > 0 {
 		lines = append(lines, fmt.Sprintf("有效期: %d 秒", m.larkLoginExpiresIn))
@@ -1930,32 +2028,65 @@ func (m *larkInitModel) renderLarkAuthLoginWaiting() string {
 	return strings.Join(lines, "\n")
 }
 
+// renderLarkAuthLoginCommands 输出 device flow 的链接和验证码,放到卡片外让用户
+// 整行复制时不会被 lipgloss 边框和尾部空格污染。
+func (m *larkInitModel) renderLarkAuthLoginCommands() string {
+	url := strings.TrimSpace(m.larkLoginURL)
+	code := strings.TrimSpace(m.larkLoginUserCode)
+	if url == "" && code == "" {
+		return ""
+	}
+	var b strings.Builder
+	if url != "" {
+		b.WriteString(initTUISubtleStyle.Render("授权链接:"))
+		b.WriteString("\n")
+		b.WriteString(url)
+	}
+	if url != "" && code != "" {
+		b.WriteString("\n\n")
+	}
+	if code != "" {
+		b.WriteString(initTUISubtleStyle.Render("验证码:"))
+		b.WriteString("\n")
+		b.WriteString(code)
+	}
+	return b.String()
+}
+
 func (m *larkInitModel) renderLarkBotLoginInstruction() string {
-	configDir := m.openClawLarkCLIConfigDir()
-	initCmd := larkBotConfigInitCommand(m.larkConfigBindAppID, configDir)
-	bindCmd := larkBotConfigBindCommand(m.larkConfigBindAppID)
 	var b strings.Builder
 	b.WriteString(initTUIAccentStyle.Render("在 OpenClaw 端登录 lark-cli bot"))
 	b.WriteString("\n")
 	b.WriteString(initTUISubtleStyle.Render("请在 OpenClaw 运行端依次执行下面两条命令；第一条会要求输入 app_secret，请在该终端粘贴，不要发给 Termind 或 agent。"))
 	b.WriteString("\n\n")
-	b.WriteString(initTUISubtleStyle.Render("1) 写入 lark-cli local workspace（输入 app_secret）："))
-	b.WriteString("\n")
-	b.WriteString(initCmd)
-	b.WriteString("\n\n")
-	b.WriteString(initTUISubtleStyle.Render("2) 同步到 OpenClaw workspace（不需要再次输入 secret）："))
-	b.WriteString("\n")
-	b.WriteString(bindCmd)
-	b.WriteString("\n\n")
-	if configDir != "" {
-		b.WriteString("OpenClaw lark-cli profile 目录: " + configDir)
-	} else {
-		b.WriteString("OpenClaw lark-cli profile 目录: ~/.lark-cli/openclaw/config.json (lark-cli 1.0.23+ openclaw workspace)")
-	}
+	b.WriteString(initTUISubtleStyle.Render("命令在卡片下方,可直接整行复制(不会带边框/尾部空格)。"))
 	b.WriteString("\n\n")
 	b.WriteString(initTUISubtleStyle.Render("两条都跑完后选择 是/Enter，Termind 会通过 skill + OpenClaw agent exec 重新获取 lark-cli bot profile 列表。"))
 	b.WriteString("\n\n")
 	b.WriteString(m.renderYesNo())
+	return b.String()
+}
+
+// renderLarkBotLoginCommands 输出复制友好的命令块,放到卡片外面,避免 lipgloss
+// 边框字符和补齐空格被一起选中复制。
+func (m *larkInitModel) renderLarkBotLoginCommands() string {
+	configDir := m.openClawLarkCLIConfigDir()
+	initCmd := larkBotConfigInitCommand(m.larkConfigBindAppID, configDir)
+	syncCmd := larkBotConfigSyncCommand(configDir)
+	var b strings.Builder
+	b.WriteString(initTUISubtleStyle.Render("1) 写入 lark-cli local workspace（输入 app_secret）："))
+	b.WriteString("\n")
+	b.WriteString(initCmd)
+	b.WriteString("\n\n")
+	b.WriteString(initTUISubtleStyle.Render("2) 复制到 OpenClaw workspace（不需要再次输入 secret，secret 在 macOS Keychain 中）："))
+	b.WriteString("\n")
+	b.WriteString(syncCmd)
+	b.WriteString("\n\n")
+	if configDir != "" {
+		b.WriteString(initTUISubtleStyle.Render("OpenClaw lark-cli profile 目录: " + configDir))
+	} else {
+		b.WriteString(initTUISubtleStyle.Render("OpenClaw lark-cli profile 目录: ~/.lark-cli/openclaw/config.json (lark-cli 1.0.23+ openclaw workspace)"))
+	}
 	return b.String()
 }
 
@@ -2151,9 +2282,9 @@ func (m *larkInitModel) stepProgress() int {
 		return m.gatewayRestartProgressStep()
 	case larkStepCheckingDoctor, larkStepDoctorFailed, larkStepLocalInstallLarkCLI, larkStepLocalConfigureLarkCLI, larkStepLarkConfigBindAppID, larkStepLarkConfigBinding, larkStepLarkBotLoginInstruction, larkStepLocalAuthLogin, larkStepLocalAuthLoginStarting, larkStepLocalAuthLoginWaiting:
 		return 3
-	case larkStepProfileChoice, larkStepSwitchingProfile:
+	case larkStepIdentitySources, larkStepLoadingOpenClawBotAccounts, larkStepSelectOpenClawBots, larkStepConfiguringIdentity, larkStepUserOAuthAppChoice, larkStepUserOAuthLabel, larkStepUserOAuthConfiguring, larkStepProfileChoice, larkStepSwitchingProfile:
 		return 4
-	case larkStepKeepExisting, larkStepAddSelf, larkStepSearchChats, larkStepChatQuery, larkStepSearchingChats, larkStepSelectChats, larkStepSearchUsers, larkStepUserQuery, larkStepSearchingUsers, larkStepSelectUsers, larkStepManualChatID, larkStepManualChatLabel, larkStepManualPersonID, larkStepManualPersonType, larkStepManualPersonLabel:
+	case larkStepForwardIdentitySelect, larkStepLoadingIdentityChats, larkStepSelectIdentityChats, larkStepSavingOpenClawConfig, larkStepKeepExisting, larkStepAddSelf, larkStepSearchChats, larkStepChatQuery, larkStepSearchingChats, larkStepSelectChats, larkStepSearchUsers, larkStepUserQuery, larkStepSearchingUsers, larkStepSelectUsers, larkStepManualChatID, larkStepManualChatLabel, larkStepManualPersonID, larkStepManualPersonType, larkStepManualPersonLabel:
 		return 5
 	case larkStepTestTargets, larkStepTestingTargets:
 		return 6

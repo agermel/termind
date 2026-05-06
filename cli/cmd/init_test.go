@@ -393,3 +393,114 @@ func mustJSON(v any) []byte {
 	b, _ := json.Marshal(v)
 	return b
 }
+
+func TestRollbackInitState_FreshInit_RemovesEntireDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// 在 init 启动前快照: 目录不存在,用户未配置。
+	snap := snapshotInitState()
+	if snap.wasConfigured {
+		t.Fatalf("wasConfigured = true, want false on fresh init")
+	}
+	if snap.dirExistedBefore {
+		t.Fatalf("dirExistedBefore = true, want false on fresh init")
+	}
+
+	// 模拟 init 中途写入的半成品状态: config.json + device-auth.json + token + keys。
+	dir := filepath.Join(home, ".config", "termind")
+	if err := os.MkdirAll(filepath.Join(dir, "keys"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"config.json", "device-auth.json", "token", "integration.zsh"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "keys", "device.key"), []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if !rollbackInitState(snap) {
+		t.Fatalf("rollbackInitState returned false, want true on fresh init")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("expected ~/.config/termind to be removed, stat err=%v", err)
+	}
+}
+
+func TestRollbackInitState_AlreadyConfigured_NoOp(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	dir := filepath.Join(home, ".config", "termind")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"server_url":"ws://existing/v1/gateway"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	snap := snapshotInitState()
+	if !snap.wasConfigured {
+		t.Fatalf("wasConfigured = false, want true when ServerURL is set")
+	}
+
+	if rollbackInitState(snap) {
+		t.Fatalf("rollbackInitState returned true, want false when user was already configured")
+	}
+	if _, err := os.Stat(cfgPath); err != nil {
+		t.Fatalf("existing config.json must be preserved, err=%v", err)
+	}
+}
+
+func TestRollbackInitState_DirExistedNotConfigured_OnlyRemovesInitFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	dir := filepath.Join(home, ".config", "termind")
+	if err := os.MkdirAll(filepath.Join(dir, "keys"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(dir, "keys", "device.key")
+	if err := os.WriteFile(keyPath, []byte("preexisting-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(dir, "integration.zsh")
+	if err := os.WriteFile(scriptPath, []byte("# integration"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 目录预先存在但用户未配置(没有 config.json 或 ServerURL 为空)。
+	snap := snapshotInitState()
+	if snap.wasConfigured {
+		t.Fatalf("wasConfigured = true, want false")
+	}
+	if !snap.dirExistedBefore {
+		t.Fatalf("dirExistedBefore = false, want true")
+	}
+
+	// 模拟 init 中途写入。
+	for _, name := range []string{"config.json", "device-auth.json", "token"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if !rollbackInitState(snap) {
+		t.Fatalf("rollbackInitState returned false, want true")
+	}
+	for _, name := range []string{"config.json", "device-auth.json", "token"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Fatalf("expected %s to be removed, err=%v", name, err)
+		}
+	}
+	// 预先存在的文件必须保留。
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("existing device.key must be preserved, err=%v", err)
+	}
+	if _, err := os.Stat(scriptPath); err != nil {
+		t.Fatalf("existing integration.zsh must be preserved, err=%v", err)
+	}
+}
