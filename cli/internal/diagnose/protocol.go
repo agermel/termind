@@ -12,9 +12,7 @@
 //	client  -->  req/sessions.get  (读取本轮 assistant 回复)
 //
 // 设计要点:
-//   - 不再调用未注册的 diagnose.start: OpenClaw 会把未知 operator 方法按
-//     operator.admin 处理,不适合 setup-code approve 后的普通 operator.write 设备。
-//   - agent/agent.wait/sessions.get 都是 OpenClaw 官方 operator read/write 方法。
+//   - agent/agent.wait/sessions.get 是 OpenClaw 官方 operator 方法。
 //   - 对 shell 侧仍暴露事件 channel,方便以后换成插件流式 token 协议而不改 UI 层。
 package diagnose
 
@@ -46,6 +44,46 @@ type Request struct {
 	Shell      string `json:"shell,omitempty"`
 	Cwd        string `json:"cwd,omitempty"`
 	Lang       string `json:"lang,omitempty"`
+	Lark       LarkRouting
+}
+
+type LarkRouting struct {
+	UserOpenID string
+	Sender     string
+	Targets    []LarkTarget
+	Forwarding LarkForwardingConfig
+}
+
+type LarkTarget struct {
+	Type    string `json:"type"`
+	ID      string `json:"id"`
+	Label   string `json:"label,omitempty"`
+	Enabled bool   `json:"enabled,omitempty"`
+}
+
+type LarkForwardingConfig struct {
+	Version    int                               `json:"version,omitempty"`
+	Identities map[string]LarkForwardingIdentity `json:"identities,omitempty"`
+	Routes     []LarkForwardingRoute             `json:"routes,omitempty"`
+}
+
+type LarkForwardingIdentity struct {
+	ID               string `json:"id,omitempty"`
+	Kind             string `json:"kind,omitempty"`
+	Label            string `json:"label,omitempty"`
+	AppID            string `json:"appId,omitempty"`
+	UserOpenID       string `json:"userOpenId,omitempty"`
+	Profile          string `json:"profile,omitempty"`
+	LarkCLIConfigDir string `json:"larkCliConfigDir,omitempty"`
+	Source           string `json:"source,omitempty"`
+	Slot             string `json:"slot,omitempty"`
+	Enabled          bool   `json:"enabled"`
+}
+
+type LarkForwardingRoute struct {
+	IdentityID string     `json:"identityId,omitempty"`
+	Target     LarkTarget `json:"target,omitempty"`
+	Enabled    bool       `json:"enabled"`
 }
 
 // TokenEvent 是 shell 层消费的诊断事件。

@@ -1,18 +1,24 @@
 package pairing
 
 import (
+	"reflect"
 	"testing"
 
 	"termind/internal/identity"
 )
 
-func TestBuildDeviceDescriptor_RoundTrip(t *testing.T) {
+func TestDefaultScopesMatchQRBootstrapAllowlist(t *testing.T) {
+	if got, want := DefaultScopes(), []string{"operator.read", "operator.write"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("DefaultScopes=%v want %v", got, want)
+	}
+}
+
+func TestBuildDeviceDescriptorV3Shape(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	id, err := identity.LoadOrCreate()
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	in := DeviceAuthInput{
 		Identity:     id,
 		Token:        "my-token",

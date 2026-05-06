@@ -16,11 +16,12 @@ import (
 )
 
 type mockDiagnoseServer struct {
-	assistantText string
-	waitStatus    string
-	waitError     string
-	seenMethods   []string
-	agentRequests []agentRequest
+	assistantText   string
+	waitStatus      string
+	waitError       string
+	sessionMessages []sessionMessage
+	seenMethods     []string
+	agentRequests   []agentRequest
 }
 
 func (m *mockDiagnoseServer) handler(t *testing.T) http.HandlerFunc {
@@ -104,11 +105,15 @@ func (m *mockDiagnoseServer) handler(t *testing.T) http.HandlerFunc {
 					Error:  m.waitError,
 				})
 			case MethodSessionsGet:
-				writeResponse(ctx, ws, req.ID, sessionsGetResponse{Messages: []sessionMessage{{
-					Role:      "assistant",
-					Text:      m.assistantText,
-					Timestamp: mustJSONRaw(time.Now().Format(time.RFC3339Nano)),
-				}}})
+				messages := m.sessionMessages
+				if len(messages) == 0 {
+					messages = []sessionMessage{{
+						Role:      "assistant",
+						Text:      m.assistantText,
+						Timestamp: mustJSONRaw(time.Now().Format(time.RFC3339Nano)),
+					}}
+				}
+				writeResponse(ctx, ws, req.ID, sessionsGetResponse{Messages: messages})
 			default:
 				writeError(ctx, ws, req.ID, "UNKNOWN", "unknown method")
 			}
@@ -214,7 +219,6 @@ func TestDiagnose_UsesOperatorAgentFlow(t *testing.T) {
 }
 
 func TestDiagnose_AlertSubmitsTermindLarkSkillPrompt(t *testing.T) {
-	t.Setenv("TERMIND_LARK_CHAT_ID", "oc_test")
 	ms := &mockDiagnoseServer{assistantText: "ignored"}
 	srv := httptest.NewServer(ms.handler(t))
 	defer srv.Close()
@@ -230,6 +234,13 @@ func TestDiagnose_AlertSubmitsTermindLarkSkillPrompt(t *testing.T) {
 		Shell:      "/bin/zsh",
 		Cwd:        "/repo",
 		Lang:       "zh_CN.UTF-8",
+		Lark: LarkRouting{
+			Sender: "bot",
+			Targets: []LarkTarget{
+				{Type: "chat", ID: "oc_test", Label: "test group", Enabled: true},
+				{Type: "user", ID: "ou_test", Label: "me", Enabled: true},
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("Alert: %v", err)
@@ -245,12 +256,16 @@ func TestDiagnose_AlertSubmitsTermindLarkSkillPrompt(t *testing.T) {
 	if req.Deliver {
 		t.Fatal("alert should hand off to OpenClaw orchestration without direct delivery")
 	}
+	if strings.Join(ms.seenMethods, ",") != strings.Join([]string{MethodAgent, MethodAgentWait, MethodSessionsGet}, ",") {
+		t.Fatalf("methods=%v, want agent then agent.wait then sessions.get", ms.seenMethods)
+	}
 	for _, want := range []string{
 		"Use the termind-lark-alert skill.",
-		"OpenClaw's `message` tool",
 		"termind_lark_card_build",
-		"channel: feishu",
+		"termind_lark_cli_send_command_build",
+		"Use lark-cli as the primary Lark/Feishu sender at runtime.",
 		"oc_test",
+		"ou_test",
 		"go run ./cmd/grade serve",
 		"panic: runtime error: invalid memory address",
 	} {
@@ -258,11 +273,73 @@ func TestDiagnose_AlertSubmitsTermindLarkSkillPrompt(t *testing.T) {
 			t.Fatalf("alert prompt missing %q:\n%s", want, req.Message)
 		}
 	}
-	if strings.Contains(req.Message, "Use lark-cli as the only") {
-		t.Fatalf("alert prompt still points at lark-cli:\n%s", req.Message)
+	for _, banned := range []string{
+		"OpenClaw's `" + "message" + "` tool",
+		"channel" + ": " + "feishu",
+		"message" + "(action=send",
+	} {
+		if strings.Contains(req.Message, banned) {
+			t.Fatalf("alert prompt contains banned text %q:\n%s", banned, req.Message)
+		}
 	}
-	if strings.Contains(req.Message, "termind_lark_cli_send_command_build") {
-		t.Fatalf("alert prompt still points at legacy lark-cli helper:\n%s", req.Message)
+}
+
+func TestDiagnose_AlertReturnsAgentWaitError(t *testing.T) {
+	ms := &mockDiagnoseServer{waitStatus: "error", waitError: "lark-cli failed"}
+	srv := httptest.NewServer(ms.handler(t))
+	defer srv.Close()
+
+	conn := dialTestConn(t, srv.URL)
+	defer conn.Close()
+
+	dc := NewClient(conn)
+	err := dc.Alert(context.Background(), &Request{
+		Command:  "false",
+		ExitCode: 1,
+		Lark: LarkRouting{
+			Targets: []LarkTarget{{Type: "chat", ID: "oc_test", Enabled: true}},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "lark-cli failed") {
+		t.Fatalf("err=%v, want lark-cli failed", err)
+	}
+}
+
+func TestDiagnose_AlertReturnsSessionExecError(t *testing.T) {
+	ms := &mockDiagnoseServer{sessionMessages: []sessionMessage{{
+		Role:      "toolResult",
+		ToolName:  "exec",
+		Content:   mustJSONRaw([]map[string]string{{"type": "text", "text": "Error: TAT API error: [10003] invalid param"}}),
+		Details:   mustJSONRaw(map[string]any{"exitCode": 1, "aggregated": "Error: TAT API error: [10003] invalid param"}),
+		Timestamp: mustJSONRaw(time.Now().Format(time.RFC3339Nano)),
+	}}}
+	srv := httptest.NewServer(ms.handler(t))
+	defer srv.Close()
+
+	conn := dialTestConn(t, srv.URL)
+	defer conn.Close()
+
+	dc := NewClient(conn)
+	err := dc.Alert(context.Background(), &Request{
+		Command:  "false",
+		ExitCode: 1,
+		Lark: LarkRouting{
+			Targets: []LarkTarget{{Type: "chat", ID: "oc_test", Enabled: true}},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid param") {
+		t.Fatalf("err=%v, want invalid param", err)
+	}
+}
+
+func TestDiagnose_SummarizeFailureSkipsPromptArtifacts(t *testing.T) {
+	got := summarizeFailure(&Request{
+		Command:    "kkk",
+		ExitCode:   127,
+		OutputTail: "zsh: command not found: kkk\r\n\u001b[1m\u001b[7m%\u001b[27m\u001b[1m\u001b[0m",
+	})
+	if got != "zsh: command not found: kkk" {
+		t.Fatalf("summary=%q", got)
 	}
 }
 

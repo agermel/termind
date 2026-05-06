@@ -26,10 +26,29 @@ const (
 	DefaultClientID     = "cli"
 	DefaultClientMode   = "cli"
 	DefaultDeviceFamily = "desktop"
+	OperatorScopeRead   = "operator.read"
+	OperatorScopeWrite  = "operator.write"
 )
 
 func DefaultScopes() []string {
-	return []string{"operator.read", "operator.write"}
+	return []string{OperatorScopeRead, OperatorScopeWrite}
+}
+
+func HasScopes(scopes []string, required []string) bool {
+	if len(required) == 0 {
+		return true
+	}
+	normalized := NormalizeScopes(scopes)
+	set := make(map[string]struct{}, len(normalized))
+	for _, scope := range normalized {
+		set[scope] = struct{}{}
+	}
+	for _, scope := range required {
+		if _, ok := set[scope]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func DefaultPlatform() string {

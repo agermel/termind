@@ -51,6 +51,22 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 				fmt.Fprintf(out, "  paired at:  %s\n", cfg.PairedAt.Format("2006-01-02 15:04:05 MST"))
 			}
 		}
+		if cfg.Lark.UserOpenID != "" || cfg.Lark.Sender != "" || len(cfg.Lark.Targets) > 0 {
+			fmt.Fprintln(out, "  lark:")
+			if cfg.Lark.UserOpenID != "" {
+				fmt.Fprintf(out, "    user:     %s\n", cfg.Lark.UserOpenID)
+			}
+			if cfg.Lark.Sender != "" {
+				fmt.Fprintf(out, "    sender:   %s\n", cfg.Lark.Sender)
+			}
+			for _, target := range cfg.Lark.Targets {
+				state := "off"
+				if target.Enabled {
+					state = "on"
+				}
+				fmt.Fprintf(out, "    target:   [%s] %s %s %s\n", state, target.Type, target.ID, target.Label)
+			}
+		}
 	}
 
 	// 2. 身份

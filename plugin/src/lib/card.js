@@ -99,32 +99,17 @@ function tailBlock(event) {
 }
 
 function actionBlock(event) {
-  const actions = [];
-  if (event.reportUrl) {
-    actions.push({
-      tag: "button",
-      text: {
-        tag: "plain_text",
-        content: "打开报告"
-      },
-      type: "primary",
-      url: event.reportUrl
-    });
-  }
-  actions.push({
+  if (!event.reportUrl) return null;
+  return {
+    tag: "action",
+    actions: [{
     tag: "button",
     text: {
       tag: "plain_text",
-      content: "标记误报"
+      content: "打开报告"
     },
-    type: "default",
-    value: {
-      action: "termind.false_positive",
-      fingerprint: event.fingerprint
-    }
-  });
-  return {
-    tag: "action",
-    actions
+    type: "primary",
+    url: event.reportUrl
+    }]
   };
 }

@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ -z "${TERMIND_LARK_CHAT_ID:-}" ]]; then
-  echo "TERMIND_LARK_CHAT_ID is required, for example: export TERMIND_LARK_CHAT_ID=oc_xxx" >&2
+if [[ -z "${TERMIND_LARK_TARGET_ID:-}" ]]; then
+  echo "TERMIND_LARK_TARGET_ID is required, for example: export TERMIND_LARK_TARGET_ID=oc_xxx" >&2
   exit 2
 fi
+
+target_type="${TERMIND_LARK_TARGET_TYPE:-chat}"
+sender="${TERMIND_LARK_SENDER:-bot}"
 
 card='{
   "config": {
@@ -68,8 +71,16 @@ card='{
   ]
 }'
 
-openclaw message send \
-  --channel feishu \
-  --target "$TERMIND_LARK_CHAT_ID" \
-  --card "$card" \
-  --json
+if [[ "$target_type" == "chat" ]]; then
+  lark-cli im +messages-send \
+    --as "$sender" \
+    --chat-id "$TERMIND_LARK_TARGET_ID" \
+    --content "$card" \
+    --msg-type interactive
+else
+  lark-cli im +messages-send \
+    --as "$sender" \
+    --user-id "$TERMIND_LARK_TARGET_ID" \
+    --content "$card" \
+    --msg-type interactive
+fi

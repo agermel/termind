@@ -19,6 +19,9 @@ export function normalizeFailureEvent(input, options = {}) {
     environment: optionalString(input.environment, 200),
     tail: optionalString(input.tail, 4000),
     larkChatId: optionalString(input.larkChatId ?? input.chatId, 160),
+    larkUserOpenId: optionalString(input.larkUserOpenId ?? input.userOpenId, 160),
+    larkSender: normalizeLarkSender(input.larkSender ?? input.sender),
+    larkTargets: normalizeLarkTargets(input.larkTargets ?? input.targets),
     stackTop: Array.isArray(input.stackTop)
       ? input.stackTop.map(value => optionalString(value, 300)).filter(Boolean).slice(0, 5)
       : [],
@@ -49,7 +52,7 @@ function requiredString(value, name) {
 
 function optionalString(value, max) {
   if (value == null) return "";
-  const out = String(value).trim();
+  const out = cleanTerminalText(String(value)).trim();
   if (max > 0) return out.slice(0, max);
   return out;
 }
@@ -59,6 +62,26 @@ function normalizeSeverity(value) {
     return value;
   }
   return "warning";
+}
+
+function normalizeLarkTargets(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map(target => ({
+    type: normalizeLarkTargetType(target?.type),
+    id: optionalString(target?.id ?? target?.target ?? target?.chatId ?? target?.userId, 160),
+    label: optionalString(target?.label ?? target?.name, 120),
+    enabled: target?.enabled !== false
+  })).filter(target => target.id).slice(0, 10);
+}
+
+function normalizeLarkTargetType(value) {
+  if (value === "user" || value === "bot") return value;
+  return "chat";
+}
+
+function normalizeLarkSender(value) {
+  if (value === "user") return "user";
+  return "bot";
 }
 
 function numberOrZero(value) {
@@ -72,5 +95,13 @@ function redact(value) {
   for (const pattern of secretPatterns) {
     out = out.replace(pattern, (_match, prefix = "") => `${prefix}[REDACTED]`);
   }
-  return out;
+  return cleanTerminalText(out);
+}
+
+function cleanTerminalText(value) {
+  return String(value)
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g, "")
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "");
 }

@@ -3,22 +3,23 @@
 This directory contains small, repeatable checks for the Termind -> OpenClaw
 -> Feishu/Lark notification path.
 
-The production path does not use `lark-cli` as the sender:
+The production path uses `lark-cli` as the sender:
 
 ```text
 Termind failure event
   -> OpenClaw agent
   -> Termind plugin pure tools
-  -> OpenClaw message tool (channel=feishu, card=...)
+  -> termind_lark_cli_send_command_build
+  -> OpenClaw exec runs lark-cli im +messages-send
   -> Feishu/Lark interactive card
 ```
 
 ## Prerequisites
 
 - OpenClaw 2026.4.2 or compatible.
-- Feishu channel configured in OpenClaw.
+- `lark-cli` installed and authenticated.
 - Termind plugin installed.
-- OpenClaw agent profile includes the `message` tool:
+- OpenClaw agent profile includes `exec` and Termind plugin tools:
 
 ```bash
 openclaw config get tools --json
@@ -28,36 +29,43 @@ openclaw config get tools --json
 
 ```json
 [
-  "message",
+  "exec",
   "termind_event_redact",
   "termind_fingerprint_compute",
   "termind_failure_classify",
-  "termind_lark_card_build"
+  "termind_lark_card_build",
+  "termind_lark_cli_send_command_build"
 ]
 ```
 
-Set the target chat id:
+The OpenClaw exec approvals allowlist should allow the `lark-cli` binary:
 
 ```bash
-export TERMIND_LARK_CHAT_ID=oc_xxx
+openclaw approvals allowlist add "$(command -v lark-cli)"
 ```
 
-## Smoke 1: OpenClaw Feishu Channel
+Set the target for the direct lark-cli smoke:
 
-This bypasses the agent and verifies OpenClaw can send an interactive card to
-Feishu:
+```bash
+export TERMIND_LARK_TARGET_ID=oc_xxx
+export TERMIND_LARK_TARGET_TYPE=chat
+export TERMIND_LARK_SENDER=bot
+```
+
+## Smoke 1: Direct lark-cli Card Send
+
+This bypasses the agent and verifies `lark-cli` can send an interactive card:
 
 ```bash
 plugin/examples/lark-smoke/scripts/openclaw-message-card-smoke.sh
 ```
 
-Expected result: JSON output with `ok: true`, `channel: "feishu"`, and a
-`messageId`.
+Expected result: `lark-cli` returns a successful message response.
 
 ## Smoke 2: OpenClaw Agent Orchestration
 
 This asks the agent to call the Termind plugin tools, build the card, and send
-it with OpenClaw's `message` tool:
+it by executing the generated `lark-cli` command through OpenClaw exec:
 
 ```bash
 openclaw agent --local --agent main \
@@ -66,15 +74,15 @@ openclaw agent --local --agent main \
   --timeout 180
 ```
 
-Expected result: agent reports delivery only after the `message` tool returns
-`ok: true`.
+Expected result: agent reports delivery only after every `lark-cli` command
+exits successfully.
 
 ## Smoke 3: Full Termind Shell Path
 
 Run:
 
 ```bash
-export TERMIND_LARK_CHAT_ID=oc_xxx
+termind init
 TERMIND_DEBUG=1 termind shell
 cnmb
 ```
@@ -87,6 +95,6 @@ Expected result:
 
 ## Notes
 
-`feishu_chat` is useful for chat/member information, but in OpenClaw 2026.4.2
-it is not the send-card path. Card delivery should go through `message` with
-`channel=feishu`.
+`termind init` stores selected Lark targets in `~/.config/termind/config.json`.
+The alert event sends `larkTargets` to OpenClaw; the Termind plugin builds
+`lark-cli im +messages-send` commands for those targets.

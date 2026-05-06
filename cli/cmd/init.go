@@ -25,11 +25,30 @@ var (
 	initSetupCode       string
 	initTimeout         time.Duration
 	initSkipShell       bool
+	initSkipLark        bool
 	initManualSetupCode bool
 	initContinueShell   bool
 )
 
-var errOpenClawNotFound = errors.New("openclaw command not found")
+var (
+	errOpenClawNotFound = errors.New("openclaw command not found")
+	errInitCancelled    = errors.New("init cancelled")
+)
+
+type initOpenClawMode string
+
+const (
+	initOpenClawLocal  initOpenClawMode = "local"
+	initOpenClawRemote initOpenClawMode = "remote"
+)
+
+type initOpenClawConnection struct {
+	Setup    *pairing.SetupCode
+	Mode     initOpenClawMode
+	AuthPath string
+}
+
+type initApprovalStatusFunc func(string)
 
 // initCmd 是首次配置入口:安装 shell integration,并通过 OpenClaw Gateway
 // device pairing request 完成设备批准。
@@ -51,6 +70,17 @@ func runInit(cmd *cobra.Command, _ []string) error {
 	ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt)
 	defer cancel()
 
+	if err := runInitWithContext(ctx, cmd); err != nil {
+		if errors.Is(err, context.Canceled) {
+			fmt.Fprintln(cmd.OutOrStdout(), "已取消 init。")
+			return errInitCancelled
+		}
+		return err
+	}
+	return nil
+}
+
+func runInitWithContext(ctx context.Context, cmd *cobra.Command) error {
 	if !initSkipShell {
 		r, err := integration.Install()
 		if err != nil {
@@ -67,59 +97,129 @@ func runInit(cmd *cobra.Command, _ []string) error {
 		fmt.Println()
 	}
 
-	setup, err := resolveInitSetupCode(ctx, cmd)
-	if err != nil {
-		return err
-	}
-
 	id, err := identity.LoadOrCreate()
 	if err != nil {
 		return fmt.Errorf("load identity: %w", err)
 	}
 
-	fmt.Printf("device id:   %s\n", id.DeviceID())
-	fmt.Printf("fingerprint: %s\n", id.Fingerprint())
-	fmt.Printf("server:      %s\n", gateway.NormalizeGatewayURL(setup.URL))
-	fmt.Println()
-
-	path, err := waitForDeviceApproval(ctx, setup, id, initTimeout)
+	openClaw, err := runInitOpenClawTUI(ctx, cmd, id, initTimeout)
 	if err != nil {
 		return err
 	}
+	setup := openClaw.Setup
 
 	fmt.Println()
-	fmt.Printf("✓ OpenClaw 连接已批准,device token 已存至 %s\n", path)
+	fmt.Printf("✓ OpenClaw 连接已批准,device token 已存至 %s\n", openClaw.AuthPath)
 	fmt.Println()
+	if !initSkipLark {
+		if err := runLarkInitTUI(ctx, cmd.InOrStdin(), cmd.OutOrStdout(), gateway.NormalizeGatewayURL(setup.URL), openClaw.Mode == initOpenClawLocal); err != nil {
+			return err
+		}
+		fmt.Println()
+	}
 	printInitNextSteps(os.Stdout, initContinueShell)
 	return nil
 }
 
 func resolveInitSetupCode(ctx context.Context, cmd *cobra.Command) (*pairing.SetupCode, error) {
-	if strings.TrimSpace(initSetupCode) != "" {
-		return pairing.ParseSetupCode(initSetupCode)
+	openClaw, err := resolveInitOpenClawConnection(ctx, cmd)
+	if err != nil {
+		return nil, err
 	}
+	return openClaw.Setup, nil
+}
+
+func resolveInitOpenClawConnection(ctx context.Context, cmd *cobra.Command) (*initOpenClawConnection, error) {
+	if strings.TrimSpace(initSetupCode) != "" {
+		setup, err := pairing.ParseSetupCode(initSetupCode)
+		if err != nil {
+			return nil, err
+		}
+		mode := initOpenClawRemote
+		if isLocalOpenClawGatewayURL(gateway.NormalizeGatewayURL(setup.URL)) {
+			mode = initOpenClawLocal
+		}
+		return &initOpenClawConnection{Setup: setup, Mode: mode}, nil
+	}
+	reader := bufio.NewReader(cmd.InOrStdin())
+	mode, err := promptOpenClawMode(ctx, reader, cmd.OutOrStdout())
+	if err != nil {
+		return nil, err
+	}
+	if mode == initOpenClawLocal {
+		return resolveLocalOpenClawConnection(ctx, reader, cmd.OutOrStdout())
+	}
+	return resolveRemoteOpenClawConnection(ctx, reader, cmd.OutOrStdout())
+}
+
+func promptOpenClawMode(ctx context.Context, reader *bufio.Reader, out io.Writer) (initOpenClawMode, error) {
+	defaultChoice := "1"
+	if _, err := exec.LookPath("openclaw"); err != nil {
+		defaultChoice = "2"
+	}
+	fmt.Fprintln(out, "OpenClaw 连接配置")
+	fmt.Fprintln(out, "  1. 本机 OpenClaw: 自动生成 setup code,并尽量自动配置插件/allowlist")
+	fmt.Fprintln(out, "  2. 远程 OpenClaw: 在 OpenClaw 所在机器生成 setup code,本机只粘贴连接码")
+	choice, err := promptLine(ctx, reader, out, "OpenClaw 在哪里? 选择 1/2", defaultChoice)
+	if err != nil {
+		return "", err
+	}
+	switch strings.TrimSpace(choice) {
+	case "1", "local", "本机":
+		return initOpenClawLocal, nil
+	case "2", "remote", "远程":
+		return initOpenClawRemote, nil
+	default:
+		return "", fmt.Errorf("未知 OpenClaw 位置选择: %s", choice)
+	}
+}
+
+func resolveLocalOpenClawConnection(ctx context.Context, reader *bufio.Reader, out io.Writer) (*initOpenClawConnection, error) {
 	if !initManualSetupCode {
 		localCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		setup, err := generateLocalOpenClawSetupCode(localCtx)
 		cancel()
 		if err == nil {
-			fmt.Println("✓ 已从本机 OpenClaw 自动生成 setup code")
-			fmt.Println()
-			return setup, nil
+			fmt.Fprintln(out, "✓ 已从本机 OpenClaw 自动生成 setup code")
+			fmt.Fprintln(out)
+			return &initOpenClawConnection{Setup: setup, Mode: initOpenClawLocal}, nil
 		}
-		if !errors.Is(err, errOpenClawNotFound) {
-			fmt.Printf("本机 OpenClaw setup code 自动生成失败: %v\n", err)
-			fmt.Println()
+		if errors.Is(err, errOpenClawNotFound) {
+			fmt.Fprintln(out, "未找到本机 openclaw 命令,无法自动生成 setup code。")
+		} else {
+			fmt.Fprintf(out, "本机 OpenClaw setup code 自动生成失败: %v\n", err)
+		}
+		fmt.Fprintln(out)
+		ok, err := promptConfirm(ctx, reader, out, "改为手动粘贴 setup code", true)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, fmt.Errorf("未完成 OpenClaw setup code 配置")
 		}
 	}
-	printSetupCodeInstructions()
-	fmt.Print("OpenClaw setup code: ")
-	reader := bufio.NewReader(cmd.InOrStdin())
-	line, err := reader.ReadString('\n')
-	if err != nil && strings.TrimSpace(line) == "" {
-		return nil, fmt.Errorf("read setup code: %w", err)
+	printLocalSetupCodeInstructions(out)
+	setup, err := promptSetupCode(ctx, reader, out)
+	if err != nil {
+		return nil, err
 	}
-	value := strings.TrimSpace(line)
+	return &initOpenClawConnection{Setup: setup, Mode: initOpenClawLocal}, nil
+}
+
+func resolveRemoteOpenClawConnection(ctx context.Context, reader *bufio.Reader, out io.Writer) (*initOpenClawConnection, error) {
+	printRemoteSetupCodeInstructions(out)
+	setup, err := promptSetupCode(ctx, reader, out)
+	if err != nil {
+		return nil, err
+	}
+	return &initOpenClawConnection{Setup: setup, Mode: initOpenClawRemote}, nil
+}
+
+func promptSetupCode(ctx context.Context, reader *bufio.Reader, out io.Writer) (*pairing.SetupCode, error) {
+	value, err := promptLine(ctx, reader, out, "OpenClaw setup code", "")
+	if err != nil {
+		return nil, err
+	}
 	if value == "" {
 		return nil, fmt.Errorf("OpenClaw setup code 不能为空")
 	}
@@ -138,12 +238,32 @@ func generateLocalOpenClawSetupCode(ctx context.Context) (*pairing.SetupCode, er
 		}
 		return nil, fmt.Errorf("%s", message)
 	}
-	code := strings.TrimSpace(string(out))
-	setup, err := pairing.ParseSetupCode(code)
+	setup, err := parseSetupCodeFromOpenClawOutput(out)
 	if err != nil {
 		return nil, fmt.Errorf("parse generated setup code: %w", err)
 	}
 	return setup, nil
+}
+
+func parseSetupCodeFromOpenClawOutput(out []byte) (*pairing.SetupCode, error) {
+	var setup *pairing.SetupCode
+	var lastErr error
+	for _, field := range strings.Fields(string(out)) {
+		candidate := strings.Trim(field, "`'\"")
+		parsed, err := pairing.ParseSetupCode(candidate)
+		if err == nil {
+			setup = parsed
+			continue
+		}
+		lastErr = err
+	}
+	if setup != nil {
+		return setup, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, errors.New("setup code output is empty")
 }
 
 func localOpenClawGatewayURL(ctx context.Context) string {
@@ -159,6 +279,22 @@ func localOpenClawGatewayURL(ctx context.Context) string {
 }
 
 func waitForDeviceApproval(ctx context.Context, setup *pairing.SetupCode, id *identity.Identity, timeout time.Duration) (string, error) {
+	return waitForDeviceApprovalWithScopes(ctx, setup, id, timeout, requestedBootstrapScopes())
+}
+
+func requestedBootstrapScopes() []string {
+	return pairing.DefaultScopes()
+}
+
+func waitForDeviceApprovalWithScopes(ctx context.Context, setup *pairing.SetupCode, id *identity.Identity, timeout time.Duration, scopes []string) (string, error) {
+	return waitForDeviceApprovalWithScopesAndStatus(ctx, setup, id, timeout, scopes, nil)
+}
+
+func waitForDeviceApprovalWithStatus(ctx context.Context, setup *pairing.SetupCode, id *identity.Identity, timeout time.Duration, onStatus initApprovalStatusFunc) (string, error) {
+	return waitForDeviceApprovalWithScopesAndStatus(ctx, setup, id, timeout, requestedBootstrapScopes(), onStatus)
+}
+
+func waitForDeviceApprovalWithScopesAndStatus(ctx context.Context, setup *pairing.SetupCode, id *identity.Identity, timeout time.Duration, scopes []string, onStatus initApprovalStatusFunc) (string, error) {
 	if setup == nil {
 		return "", errors.New("setup code is required")
 	}
@@ -178,7 +314,7 @@ func waitForDeviceApproval(ctx context.Context, setup *pairing.SetupCode, id *id
 			Identity:         id,
 			BootstrapToken:   setup.BootstrapToken,
 			Role:             pairing.DefaultRole,
-			Scopes:           pairing.DefaultScopes(),
+			Scopes:           scopes,
 			ClientID:         pairing.DefaultClientID,
 			ClientMode:       pairing.DefaultClientMode,
 			ClientVersion:    Version,
@@ -197,15 +333,21 @@ func waitForDeviceApproval(ctx context.Context, setup *pairing.SetupCode, id *id
 			if issuedRole == "" {
 				issuedRole = pairing.DefaultRole
 			}
+			if issuedRole == pairing.DefaultRole && !pairing.HasScopes(issuedScopes, scopes) {
+				return "", fmt.Errorf("OpenClaw issued insufficient scopes: got %v, need %v", issuedScopes, scopes)
+			}
 			path, err := pairing.SaveDeviceAuth(id.DeviceID(), issuedRole, issuedToken, issuedScopes)
 			if err != nil {
 				return "", fmt.Errorf("save device auth: %w", err)
 			}
-			if err := config.Save(&config.Config{
-				ServerURL: gateway.NormalizeGatewayURL(setup.URL),
-				Role:      issuedRole,
-				PairedAt:  time.Now().UTC(),
-			}); err != nil {
+			cfg, err := config.Load()
+			if err != nil {
+				return "", fmt.Errorf("load config: %w", err)
+			}
+			cfg.ServerURL = gateway.NormalizeGatewayURL(setup.URL)
+			cfg.Role = issuedRole
+			cfg.PairedAt = time.Now().UTC()
+			if err := config.Save(cfg); err != nil {
 				return "", fmt.Errorf("save config: %w", err)
 			}
 			return path, nil
@@ -220,15 +362,51 @@ func waitForDeviceApproval(ctx context.Context, setup *pairing.SetupCode, id *id
 		}
 		if rid := ce.PairingRequestID(); rid != "" && rid != requestID {
 			requestID = rid
-			fmt.Println("已向 OpenClaw 发起设备批准请求。")
-			fmt.Printf("请在 OpenClaw 中批准 request id: %s\n", requestID)
+			emitInitApprovalStatus(func(message string) {
+				if message == "" {
+					fmt.Println()
+					return
+				}
+				fmt.Println(message)
+			}, "已向 OpenClaw 发起设备批准请求。")
+			emitInitApprovalStatus(func(message string) {
+				if message == "" {
+					fmt.Println()
+					return
+				}
+				fmt.Println(message)
+			}, fmt.Sprintf("请在 OpenClaw 中批准 request id: %s", requestID))
 			if hint := ce.RemediationHint(); hint != "" {
-				fmt.Printf("OpenClaw 提示: %s\n", hint)
+				emitInitApprovalStatus(func(message string) {
+					if message == "" {
+						fmt.Println()
+						return
+					}
+					fmt.Println(message)
+				}, fmt.Sprintf("OpenClaw 提示: %s", hint))
 			}
-			fmt.Println("termind 会自动等待批准...")
-			fmt.Println()
+			emitInitApprovalStatus(func(message string) {
+				if message == "" {
+					fmt.Println()
+					return
+				}
+				fmt.Println(message)
+			}, "termind 会自动等待批准...")
+			emitInitApprovalStatus(func(message string) {
+				if message == "" {
+					fmt.Println()
+					return
+				}
+				fmt.Println(message)
+			}, "")
 		} else if time.Now().After(nextNotice) {
-			fmt.Printf("等待 OpenClaw 批准中... (attempt %d)\n", attempt)
+			emitInitApprovalStatus(func(message string) {
+				if message == "" {
+					fmt.Println()
+					return
+				}
+				fmt.Println(message)
+			}, fmt.Sprintf("等待 OpenClaw 批准中... (attempt %d)", attempt))
 			nextNotice = time.Now().Add(15 * time.Second)
 		}
 
@@ -242,14 +420,42 @@ func waitForDeviceApproval(ctx context.Context, setup *pairing.SetupCode, id *id
 	}
 }
 
-func printSetupCodeInstructions() {
-	fmt.Println("请先在 OpenClaw 里生成 setup code。")
-	fmt.Println("常用方式:")
-	fmt.Println("  openclaw qr --setup-code-only --url ws://127.0.0.1:18789/v1/gateway")
-	fmt.Println()
-	fmt.Println("如果 OpenClaw 不在本机,请在 OpenClaw 侧用 public/tailscale URL 生成 setup code,")
-	fmt.Println("或在 OpenClaw 的 device-pair 插件里使用 /pair。")
-	fmt.Println()
+func isExpiredBootstrapTokenError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ce *gateway.ConnectError
+	if errors.As(err, &ce) {
+		text := strings.ToLower(ce.Error())
+		return strings.Contains(text, "bootstrap token") &&
+			(strings.Contains(text, "invalid") || strings.Contains(text, "expired"))
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "bootstrap token") &&
+		(strings.Contains(text, "invalid") || strings.Contains(text, "expired"))
+}
+
+func emitInitApprovalStatus(onStatus initApprovalStatusFunc, message string) {
+	if onStatus != nil {
+		onStatus(message)
+	}
+}
+
+func printLocalSetupCodeInstructions(w io.Writer) {
+	fmt.Fprintln(w, "请先在本机 OpenClaw 里生成 setup code。")
+	fmt.Fprintln(w, "常用方式:")
+	fmt.Fprintln(w, "  openclaw qr --setup-code-only --url ws://127.0.0.1:18789/v1/gateway")
+	fmt.Fprintln(w)
+}
+
+func printRemoteSetupCodeInstructions(w io.Writer) {
+	fmt.Fprintln(w, "请在远程 OpenClaw 所在机器生成 setup code。")
+	fmt.Fprintln(w, "常用方式:")
+	fmt.Fprintln(w, "  openclaw qr --setup-code-only --url ws://<这台OpenClaw可被本机访问的地址>:18789/v1/gateway")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "如果远程 OpenClaw 有 device-pair 插件,也可以在 OpenClaw 里使用 /pair。")
+	fmt.Fprintln(w, "生成后把 setup code 粘贴到这里。")
+	fmt.Fprintln(w)
 }
 
 func printInitNextSteps(w io.Writer, continueShell bool) {
@@ -266,6 +472,7 @@ func init() {
 	initCmd.Flags().StringVar(&initSetupCode, "setup-code", "", "OpenClaw setup code(base64url JSON,包含 url 和 bootstrapToken)")
 	initCmd.Flags().DurationVar(&initTimeout, "timeout", 5*time.Minute, "等待 OpenClaw 批准的最长时间")
 	initCmd.Flags().BoolVar(&initSkipShell, "skip-shell-integration", false, "跳过 shell integration 安装,只配置 OpenClaw")
+	initCmd.Flags().BoolVar(&initSkipLark, "skip-lark", false, "跳过 Lark/lark-cli 转发配置")
 	initCmd.Flags().BoolVar(&initManualSetupCode, "manual-setup-code", false, "跳过本机 openclaw 自动生成,改为手动粘贴 setup code")
 	rootCmd.AddCommand(initCmd)
 }

@@ -29,7 +29,47 @@ type Config struct {
 	// Role 是最近一次 device approval 成功的 OpenClaw device role。termind 默认作为 node。
 	Role string `json:"role,omitempty"`
 	// PairedAt 记录设备批准成功的时间,仅展示用。
-	PairedAt time.Time `json:"paired_at,omitempty"`
+	PairedAt time.Time  `json:"paired_at,omitempty"`
+	Lark     LarkConfig `json:"lark,omitempty"`
+}
+
+type LarkConfig struct {
+	UserOpenID string               `json:"user_open_id,omitempty"`
+	Sender     string               `json:"sender,omitempty"`
+	Targets    []LarkTarget         `json:"targets,omitempty"`
+	Forwarding LarkForwardingConfig `json:"forwarding,omitempty"`
+}
+
+type LarkTarget struct {
+	Type    string `json:"type,omitempty"`
+	ID      string `json:"id,omitempty"`
+	Label   string `json:"label,omitempty"`
+	Enabled bool   `json:"enabled"`
+}
+
+type LarkForwardingConfig struct {
+	Version    int                               `json:"version,omitempty"`
+	Identities map[string]LarkForwardingIdentity `json:"identities,omitempty"`
+	Routes     []LarkForwardingRoute             `json:"routes,omitempty"`
+}
+
+type LarkForwardingIdentity struct {
+	ID               string `json:"id,omitempty"`
+	Kind             string `json:"kind,omitempty"`
+	Label            string `json:"label,omitempty"`
+	AppID            string `json:"appId,omitempty"`
+	UserOpenID       string `json:"userOpenId,omitempty"`
+	Profile          string `json:"profile,omitempty"`
+	LarkCLIConfigDir string `json:"larkCliConfigDir,omitempty"`
+	Source           string `json:"source,omitempty"`
+	Slot             string `json:"slot,omitempty"`
+	Enabled          bool   `json:"enabled"`
+}
+
+type LarkForwardingRoute struct {
+	IdentityID string     `json:"identityId,omitempty"`
+	Target     LarkTarget `json:"target,omitempty"`
+	Enabled    bool       `json:"enabled"`
 }
 
 // Load 从默认路径加载;文件不存在时返回空 Config 和 nil error。

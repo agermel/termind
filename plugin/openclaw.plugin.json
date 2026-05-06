@@ -1,12 +1,100 @@
 {
   "id": "termind",
   "name": "Termind",
-  "version": "0.1.0",
+  "version": "0.1.1-dev.4",
   "description": "Safe Termind terminal intelligence tools for OpenClaw orchestration.",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "properties": {}
+    "properties": {
+      "larkForwarding": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "version": {
+            "type": "number"
+          },
+          "identities": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "bot",
+                    "user"
+                  ]
+                },
+                "label": {
+                  "type": "string"
+                },
+                "appId": {
+                  "type": "string"
+                },
+                "userOpenId": {
+                  "type": "string"
+                },
+                "profile": {
+                  "type": "string"
+                },
+                "larkCliConfigDir": {
+                  "type": "string"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "source": {
+                  "type": "string"
+                },
+                "slot": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "routes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "identityId": {
+                  "type": "string"
+                },
+                "target": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "chat",
+                        "user",
+                        "bot"
+                      ]
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "label": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "enabled": {
+                  "type": "boolean"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
   },
   "contracts": {
     "tools": [
@@ -14,11 +102,23 @@
       "termind_fingerprint_compute",
       "termind_failure_classify",
       "termind_lark_card_build",
+      "termind_lark_cli_auth_login",
+      "termind_lark_cli_config_bind",
+      "termind_lark_cli_config_init",
+      "termind_lark_cli_discover",
+      "termind_lark_cli_doctor_status",
+      "termind_lark_cli_exists",
+      "termind_lark_cli_identity_status",
+      "termind_lark_cli_login_status",
+      "termind_lark_cli_profile_use",
+      "termind_lark_cli_status",
+      "termind_lark_cli_send_command_build",
       "termind_report_template_build"
     ]
   },
   "skills": [
     "./skills/termind-lark-alert",
+    "./skills/termind-lark-cli-checks",
     "./skills/termind-knowledge-rag",
     "./skills/termind-incident-report"
   ]

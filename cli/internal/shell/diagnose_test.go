@@ -14,6 +14,7 @@ import (
 	"github.com/coder/websocket"
 
 	"termind/internal/config"
+	"termind/internal/diagnose"
 	"termind/internal/identity"
 	"termind/internal/pairing"
 )
@@ -69,6 +70,27 @@ func TestEnsureConnectedReconnectsClosedGateway(t *testing.T) {
 	}
 	if got := connects.Load(); got < 2 {
 		t.Fatalf("connects=%d, want at least 2", got)
+	}
+}
+
+func TestHasLarkAlertTarget(t *testing.T) {
+	cases := []struct {
+		name string
+		req  *diagnose.Request
+		want bool
+	}{
+		{name: "nil", req: nil, want: false},
+		{name: "empty", req: &diagnose.Request{}, want: false},
+		{name: "user open id fallback", req: &diagnose.Request{Lark: diagnose.LarkRouting{UserOpenID: "ou_test"}}, want: true},
+		{name: "enabled target", req: &diagnose.Request{Lark: diagnose.LarkRouting{Targets: []diagnose.LarkTarget{{Type: "chat", ID: "oc_test", Enabled: true}}}}, want: true},
+		{name: "disabled target", req: &diagnose.Request{Lark: diagnose.LarkRouting{Targets: []diagnose.LarkTarget{{Type: "chat", ID: "oc_test", Enabled: false}}}}, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasLarkAlertTarget(tc.req); got != tc.want {
+				t.Fatalf("hasLarkAlertTarget=%v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

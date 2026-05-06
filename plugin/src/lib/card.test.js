@@ -22,6 +22,19 @@ test("buildIncidentCard renders an interactive card", () => {
   assert.equal(card.header.template, "orange");
   assert.match(card.header.title.content, /a3f9c2d1/);
   assert.equal(card.elements.at(-1).tag, "action");
+  assert.equal(JSON.stringify(card).includes("标记误报"), false);
   assert.equal(JSON.stringify(card).includes("```"), false);
   assert.equal(card.elements[1].text.tag, "plain_text");
+});
+
+test("buildIncidentCard omits action block without reportUrl", () => {
+  const card = buildIncidentCard({
+    fingerprint: "a3f9c2d1",
+    summary: "zsh: command not found: badcmd",
+    command: "badcmd",
+    severity: "warning",
+    tail: "zsh: command not found: badcmd"
+  });
+
+  assert.equal(card.elements.some(element => element.tag === "action"), false);
 });

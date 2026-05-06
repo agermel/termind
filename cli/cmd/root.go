@@ -11,6 +11,8 @@
 package cmd
 
 import (
+	"errors"
+	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -36,8 +38,9 @@ var rootCmd = &cobra.Command{
   [M1] PTY 包装  [M2] shell integration  [M3] OSC 133 解析
   [M4] OpenClaw device approval + ws 长连  [M5] inline 流式诊断
   [M6] OpenClaw plugin(待做)`,
-	Version:      Version,
-	SilenceUsage: true, // RunE 返错时不要重复打印 Usage,我们自己打日志
+	Version:       Version,
+	SilenceUsage:  true, // RunE 返错时不要重复打印 Usage,我们自己打日志
+	SilenceErrors: true,
 }
 
 // Execute 是 main 包的唯一入口。
@@ -46,6 +49,10 @@ var rootCmd = &cobra.Command{
 // 所以这里不要再打一次,只负责设置退出码。
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
+		if errors.Is(err, errInitCancelled) {
+			os.Exit(130)
+		}
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }

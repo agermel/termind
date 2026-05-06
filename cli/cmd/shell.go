@@ -90,7 +90,7 @@ func hasCurrentDeviceAuth(cfg *config.Config) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("load device auth: %w", err)
 	}
-	return auth != nil && auth.Token != "", nil
+	return auth != nil && auth.Token != "" && pairing.HasScopes(auth.Scopes, pairing.DefaultScopes()), nil
 }
 
 func refreshShellIntegration() error {

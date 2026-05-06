@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -18,11 +18,16 @@ const (
 	agentWaitTimeout = 60 * time.Second
 )
 
+var (
+	ansiEscapeRE     = regexp.MustCompile(`\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))`)
+	controlCharRE    = regexp.MustCompile(`[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]`)
+	promptArtifactRE = regexp.MustCompile(`^[%$#>❯➜]+\s*$`)
+)
+
 // Client 把 OpenClaw Gateway 的 operator 方法封装成一次 shell 诊断。
 //
 // OpenClaw 的 operator method 权限模型会把未知方法默认视为 operator.admin。
-// termind 使用 setup-code handoff 后拿到的是 operator.read/write,所以这里走
-// 官方白名单里的 agent -> agent.wait -> sessions.get。
+// 普通诊断仍走官方 agent -> agent.wait -> sessions.get 链路。
 type Client struct {
 	conn *gateway.Conn
 }
@@ -55,6 +60,7 @@ func (c *Client) Alert(ctx context.Context, req *Request) error {
 		return errors.New("diagnose: nil gateway conn")
 	}
 	runID := "termind-alert-" + randomHex(16)
+	startedAt := time.Now()
 	agentReq := agentRequest{
 		Message:        buildAlertPrompt(req),
 		SessionKey:     alertSessionKey,
@@ -67,7 +73,41 @@ func (c *Client) Alert(ctx context.Context, req *Request) error {
 	if err := c.conn.Call(ctx, MethodAgent, agentReq, &accepted); err != nil {
 		return fmt.Errorf("agent: %w", err)
 	}
-	return nil
+	if accepted.RunID == "" {
+		accepted.RunID = runID
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, agentWaitTimeout)
+	defer cancel()
+	var waited agentWaitResponse
+	if err := c.conn.Call(waitCtx, MethodAgentWait, agentWaitRequest{
+		RunID:     accepted.RunID,
+		TimeoutMs: int(agentWaitTimeout / time.Millisecond),
+	}, &waited); err != nil {
+		return fmt.Errorf("agent.wait: %w", err)
+	}
+	switch waited.Status {
+	case "ok":
+		var sess sessionsGetResponse
+		if err := c.conn.Call(ctx, MethodSessionsGet, sessionsGetRequest{
+			Key:   alertSessionKey,
+			Limit: 24,
+		}, &sess); err != nil {
+			return fmt.Errorf("sessions.get: %w", err)
+		}
+		if err := alertDeliveryError(sess.Messages, startedAt); err != nil {
+			return err
+		}
+		return nil
+	case "timeout":
+		return errors.New("agent.wait: OpenClaw Lark alert timed out")
+	case "error":
+		if waited.Error != "" {
+			return errors.New("agent.wait: " + waited.Error)
+		}
+		return errors.New("agent.wait: OpenClaw Lark alert failed")
+	default:
+		return fmt.Errorf("agent.wait: unexpected status %s", waited.Status)
+	}
 }
 
 func (c *Client) run(ctx context.Context, req *Request, out chan<- TokenEvent) {
@@ -178,8 +218,10 @@ type sessionsGetResponse struct {
 
 type sessionMessage struct {
 	Role      string          `json:"role"`
+	ToolName  string          `json:"toolName"`
 	Text      string          `json:"text"`
 	Content   json.RawMessage `json:"content"`
+	Details   json.RawMessage `json:"details"`
 	Timestamp json.RawMessage `json:"timestamp"`
 	CreatedAt json.RawMessage `json:"createdAt"`
 }
@@ -221,15 +263,15 @@ func buildAlertPrompt(req *Request) string {
 	out.WriteString("1. termind_event_redact\n")
 	out.WriteString("2. termind_fingerprint_compute\n")
 	out.WriteString("3. termind_failure_classify\n")
-	out.WriteString("4. termind_lark_card_build\n\n")
-	out.WriteString("Then send the returned card with OpenClaw's `message` tool, using exactly:\n")
-	out.WriteString("- action: send\n")
-	out.WriteString("- channel: feishu\n")
-	out.WriteString("- target: the event.larkChatId value\n")
-	out.WriteString("- card: the `card` object returned by termind_lark_card_build\n\n")
-	out.WriteString("Do not use feishu_chat for sending; that tool is for chat/member info.\n")
-	out.WriteString("Do not use lark-cli for this flow. If the `message` tool is unavailable, say `tools.alsoAllow must include message` and do not claim delivery.\n")
-	out.WriteString("Only claim the card was sent after the `message` tool returns ok.\n\n")
+	out.WriteString("4. termind_lark_card_build\n")
+	out.WriteString("5. termind_lark_cli_send_command_build\n\n")
+	out.WriteString("Then execute each returned lark-cli command with OpenClaw exec, using the exact command and args returned by the tool.\n")
+	out.WriteString("Use lark-cli as the primary Lark/Feishu sender at runtime.\n")
+	out.WriteString("Never use OpenClaw Feishu tools, direct Feishu APIs, the message tool, or fallback scripts to send this alert.\n")
+	out.WriteString("If exec is unavailable, say `tools.alsoAllow must include exec` and do not claim delivery.\n")
+	out.WriteString("If lark-cli exits non-zero, return its exact stdout/stderr and do not try another sender.\n")
+	out.WriteString("Only claim the card was sent after lark-cli returns successfully for every enabled target.\n")
+	out.WriteString("Preserve larkTargets, larkSender, larkChatId, and larkUserOpenId when passing the event between tools.\n\n")
 	out.WriteString("Failure event:\n")
 	out.WriteString("```json\n")
 	out.Write(b)
@@ -238,6 +280,7 @@ func buildAlertPrompt(req *Request) string {
 }
 
 func failureEventFromRequest(req *Request) map[string]any {
+	tail := cleanFailureText(req.OutputTail)
 	event := map[string]any{
 		"summary":     summarizeFailure(req),
 		"command":     strings.TrimSpace(req.Command),
@@ -246,10 +289,34 @@ func failureEventFromRequest(req *Request) map[string]any {
 		"cwd":         req.Cwd,
 		"environment": req.Lang,
 		"shell":       req.Shell,
-		"tail":        trimForPrompt(req.OutputTail, 4000),
+		"tail":        trimForPrompt(tail, 4000),
 	}
-	if chatID := strings.TrimSpace(os.Getenv("TERMIND_LARK_CHAT_ID")); chatID != "" {
-		event["larkChatId"] = chatID
+	if sender := strings.TrimSpace(req.Lark.Sender); sender != "" {
+		event["larkSender"] = sender
+	}
+	if userOpenID := strings.TrimSpace(req.Lark.UserOpenID); userOpenID != "" {
+		event["larkUserOpenId"] = userOpenID
+	}
+	targets := make([]map[string]any, 0, len(req.Lark.Targets))
+	for _, target := range req.Lark.Targets {
+		id := strings.TrimSpace(target.ID)
+		if id == "" || !target.Enabled {
+			continue
+		}
+		targets = append(targets, map[string]any{
+			"type":  strings.TrimSpace(target.Type),
+			"id":    id,
+			"label": strings.TrimSpace(target.Label),
+		})
+	}
+	if len(targets) > 0 {
+		event["larkTargets"] = targets
+	}
+	if len(req.Lark.Forwarding.Identities) > 0 {
+		event["larkForwardingIdentities"] = req.Lark.Forwarding.Identities
+	}
+	if len(req.Lark.Forwarding.Routes) > 0 {
+		event["larkForwardingRoutes"] = req.Lark.Forwarding.Routes
 	}
 	for k, v := range event {
 		if s, ok := v.(string); ok && strings.TrimSpace(s) == "" {
@@ -260,12 +327,12 @@ func failureEventFromRequest(req *Request) map[string]any {
 }
 
 func summarizeFailure(req *Request) string {
-	tail := strings.TrimSpace(req.OutputTail)
+	tail := strings.TrimSpace(cleanFailureText(req.OutputTail))
 	if tail != "" {
 		lines := strings.Split(tail, "\n")
 		for i := len(lines) - 1; i >= 0; i-- {
 			line := strings.TrimSpace(lines[i])
-			if line != "" {
+			if line != "" && !isPromptArtifact(line) {
 				return line
 			}
 		}
@@ -274,6 +341,94 @@ func summarizeFailure(req *Request) string {
 		return fmt.Sprintf("command failed: %s", strings.TrimSpace(req.Command))
 	}
 	return fmt.Sprintf("command failed with exit code %d", req.ExitCode)
+}
+
+func cleanFailureText(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	s = ansiEscapeRE.ReplaceAllString(s, "")
+	s = controlCharRE.ReplaceAllString(s, "")
+	lines := strings.Split(s, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		out = append(out, strings.TrimRight(line, " \t"))
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+func isPromptArtifact(line string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return true
+	}
+	return promptArtifactRE.MatchString(line)
+}
+
+func alertDeliveryError(messages []sessionMessage, after time.Time) error {
+	cutoff := after.Add(-5 * time.Second)
+	var lastAssistant string
+	for _, msg := range messages {
+		if !messageAfter(msg, cutoff) {
+			continue
+		}
+		if strings.EqualFold(msg.ToolName, "exec") {
+			if err := execMessageError(msg); err != nil {
+				return err
+			}
+		}
+		if isAssistantRole(msg.Role) {
+			if text := strings.TrimSpace(extractMessageText(msg)); text != "" {
+				lastAssistant = text
+			}
+		}
+	}
+	if looksLikeNoDelivery(lastAssistant) {
+		return errors.New("OpenClaw Lark alert did not deliver: " + firstLine(lastAssistant))
+	}
+	return nil
+}
+
+func execMessageError(msg sessionMessage) error {
+	var details struct {
+		ExitCode   *int   `json:"exitCode"`
+		Aggregated string `json:"aggregated"`
+	}
+	if len(msg.Details) > 0 && string(msg.Details) != "null" {
+		_ = json.Unmarshal(msg.Details, &details)
+	}
+	if details.ExitCode == nil || *details.ExitCode == 0 {
+		return nil
+	}
+	text := strings.TrimSpace(details.Aggregated)
+	if text == "" {
+		text = strings.TrimSpace(extractMessageText(msg))
+	}
+	if text == "" {
+		text = fmt.Sprintf("exit code %d", *details.ExitCode)
+	}
+	return fmt.Errorf("lark-cli exec failed: %s", firstLine(text))
+}
+
+func looksLikeNoDelivery(text string) bool {
+	text = strings.ToLower(strings.TrimSpace(text))
+	if text == "" {
+		return false
+	}
+	return strings.Contains(text, "no delivery") ||
+		strings.Contains(text, "no successful delivery") ||
+		strings.Contains(text, "no delivery to claim") ||
+		strings.Contains(text, "invalid param") ||
+		strings.Contains(text, "lark-cli failed")
+}
+
+func firstLine(text string) string {
+	for _, line := range strings.Split(cleanFailureText(text), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			return line
+		}
+	}
+	return strings.TrimSpace(text)
 }
 
 func cleanTerminalText(s string) string {

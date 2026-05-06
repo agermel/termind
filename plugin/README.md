@@ -10,8 +10,8 @@ Instead, it provides pure tools and workflow skills:
 Termind FailureEvent
   -> OpenClaw agent
   -> Termind plugin pure tools
-       redact / fingerprint / classify / build card
-  -> OpenClaw message tool (channel=feishu, card=...)
+       redact / fingerprint / classify / build card / build lark-cli argv
+  -> OpenClaw exec runs lark-cli im +messages-send
   -> Lark/Feishu interactive card
 ```
 
@@ -21,6 +21,7 @@ Termind FailureEvent
 - `termind_fingerprint_compute`: compute deterministic fingerprint metadata.
 - `termind_failure_classify`: classify severity and routing hints.
 - `termind_lark_card_build`: build Lark/Feishu interactive card JSON.
+- `termind_lark_cli_send_command_build`: build safe `lark-cli` command argv.
 - `termind_report_template_build`: build a Markdown incident report template.
 
 All tools are side-effect free. They only transform input JSON into output JSON.
@@ -28,7 +29,7 @@ All tools are side-effect free. They only transform input JSON into output JSON.
 ## Skills
 
 - `termind-lark-alert`: use Termind tools to produce a safe Lark/Feishu card
-  and send it through OpenClaw's Feishu channel via the `message` tool.
+  and send it by executing `lark-cli im +messages-send` through OpenClaw exec.
 - `termind-knowledge-rag`: progressively search OpenClaw memory/wiki/Feishu
   docs, with graceful fallback when capabilities are missing.
 - `termind-incident-report`: create or update incident report templates.
@@ -36,23 +37,23 @@ All tools are side-effect free. They only transform input JSON into output JSON.
 ## Install For Testing
 
 ```bash
-openclaw plugins install /Users/matterhorn/work/lark/plugin
+openclaw plugins install termind-openclaw-plugin@dev
 openclaw plugins inspect termind
 ```
 
 This safe POC should not require `--dangerously-force-unsafe-install`.
 
-The agent profile must allow the pure Termind tools plus OpenClaw's `message`
-tool:
+The agent profile must allow the pure Termind tools plus OpenClaw exec:
 
 ```bash
 openclaw config set tools.alsoAllow '[
   "browser",
-  "message",
+  "exec",
   "termind_event_redact",
   "termind_fingerprint_compute",
   "termind_failure_classify",
   "termind_lark_card_build",
+  "termind_lark_cli_send_command_build",
   "termind_report_template_build"
 ]' --strict-json
 ```
@@ -62,19 +63,13 @@ Restart the gateway after changing OpenClaw config.
 ## Send Flow
 
 This plugin does not execute shell commands or network requests directly. It
-builds the card; OpenClaw sends it with the built-in `message` tool:
+builds the card and controlled `lark-cli` argv; OpenClaw executes the command:
 
-```json
-{
-  "action": "send",
-  "channel": "feishu",
-  "target": "oc_xxx",
-  "card": { "...": "interactive card JSON from termind_lark_card_build" }
-}
+```bash
+lark-cli im +messages-send --as bot --chat-id oc_xxx --content '<interactive-card-json>' --msg-type interactive
 ```
 
-The OpenClaw agent profile must allow the `message` tool, for example by adding
-`message` to `tools.alsoAllow`. OpenClaw 2026.4.2's built-in `feishu_chat` tool
-can inspect chats and members, but it is not an IM send-card tool.
+The OpenClaw agent profile must allow `exec`, and the exec approvals allowlist
+must allow the `lark-cli` binary.
 
 See `examples/lark-smoke/` for smoke tests.

@@ -1,21 +1,21 @@
 Use the termind-lark-alert skill.
 
 Build a Lark/Feishu interactive card for this Termind failure event, then send
-it with OpenClaw's message tool. Do not use lark-cli and do not use feishu_chat
-for sending.
+it with `lark-cli im +messages-send` through OpenClaw exec.
 
 Call the Termind plugin tools in this order:
 1. `termind_event_redact`
 2. `termind_fingerprint_compute`
 3. `termind_failure_classify`
 4. `termind_lark_card_build`
-5. `message` with:
-   - `action`: `send`
-   - `channel`: `feishu`
-   - `target`: `event.larkChatId`
-   - `card`: the card object returned by `termind_lark_card_build`
+5. `termind_lark_cli_send_command_build` with the redacted event and card
+6. OpenClaw exec with every returned `lark-cli` command and args
 
-Only claim delivery after the `message` tool returns `ok: true`.
+Only claim delivery after every `lark-cli` command exits successfully.
+Do not use OpenClaw Feishu tools, direct Feishu APIs, the `message` tool, or
+hand-written fallback scripts. If `lark-cli` fails, report the exact failure.
+Preserve `larkTargets`, `larkSender`, `larkChatId`, and `larkUserOpenId` when
+passing the event between tools.
 
 Failure event:
 
@@ -30,7 +30,14 @@ Failure event:
   "gitCommit": "8e4d21a",
   "branch": "feat/rank-v2",
   "environment": "go1.22.3 macOS dev",
-  "larkChatId": "oc_4bf56e2d154b54e29c4837e44b17433d",
+  "larkSender": "bot",
+  "larkTargets": [
+    {
+      "type": "chat",
+      "id": "oc_4bf56e2d154b54e29c4837e44b17433d",
+      "label": "smoke group"
+    }
+  ],
   "stackTop": [
     "be-grade/cron/rank.go:87 computeRank()",
     "be-grade/cron/rank.go:42 (*RankJob).Run()"

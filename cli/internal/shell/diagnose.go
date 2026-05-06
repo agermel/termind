@@ -116,6 +116,9 @@ func connectDiagnoseClient(parentCtx context.Context) (*gateway.Conn, *diagnose.
 	if role == pairing.DefaultRole && len(scopes) == 0 {
 		scopes = pairing.DefaultScopes()
 	}
+	if role == pairing.DefaultRole && !pairing.HasScopes(scopes, pairing.DefaultScopes()) {
+		return nil, nil, "", fmt.Errorf("OpenClaw device token has insufficient scopes: got %v, need %v", scopes, pairing.DefaultScopes())
+	}
 
 	// 3 秒硬超时: 连不上就降级,不拖住 shell 启动
 	dialCtx, cancel := context.WithTimeout(parentCtx, 3*time.Second)
@@ -316,6 +319,49 @@ func (d *dispatcher) cancelActive(reason string) {
 // 出错不 panic,只打 log 和 Fail 给用户看。
 func (d *dispatcher) requestFromCommand(c cmdbuf.Command) *diagnose.Request {
 	cwd, _ := os.Getwd()
+	lark := diagnose.LarkRouting{}
+	if cfg, err := config.Load(); err == nil && cfg != nil {
+		lark.UserOpenID = strings.TrimSpace(cfg.Lark.UserOpenID)
+		lark.Sender = strings.TrimSpace(cfg.Lark.Sender)
+		lark.Forwarding = diagnose.LarkForwardingConfig{
+			Version:    cfg.Lark.Forwarding.Version,
+			Identities: map[string]diagnose.LarkForwardingIdentity{},
+			Routes:     []diagnose.LarkForwardingRoute{},
+		}
+		for id, identity := range cfg.Lark.Forwarding.Identities {
+			lark.Forwarding.Identities[id] = diagnose.LarkForwardingIdentity{
+				Kind:             strings.TrimSpace(identity.Kind),
+				Label:            strings.TrimSpace(identity.Label),
+				AppID:            strings.TrimSpace(identity.AppID),
+				UserOpenID:       strings.TrimSpace(identity.UserOpenID),
+				Profile:          strings.TrimSpace(identity.Profile),
+				LarkCLIConfigDir: strings.TrimSpace(identity.LarkCLIConfigDir),
+				Source:           strings.TrimSpace(identity.Source),
+				Slot:             strings.TrimSpace(identity.Slot),
+				Enabled:          identity.Enabled,
+			}
+		}
+		for _, route := range cfg.Lark.Forwarding.Routes {
+			lark.Forwarding.Routes = append(lark.Forwarding.Routes, diagnose.LarkForwardingRoute{
+				IdentityID: strings.TrimSpace(route.IdentityID),
+				Target: diagnose.LarkTarget{
+					Type:    strings.TrimSpace(route.Target.Type),
+					ID:      strings.TrimSpace(route.Target.ID),
+					Label:   strings.TrimSpace(route.Target.Label),
+					Enabled: route.Target.Enabled,
+				},
+				Enabled: route.Enabled,
+			})
+		}
+		for _, target := range cfg.Lark.Targets {
+			lark.Targets = append(lark.Targets, diagnose.LarkTarget{
+				Type:    strings.TrimSpace(target.Type),
+				ID:      strings.TrimSpace(target.ID),
+				Label:   strings.TrimSpace(target.Label),
+				Enabled: target.Enabled,
+			})
+		}
+	}
 	return &diagnose.Request{
 		Command:    c.Text,
 		ExitCode:   c.Exit,
@@ -323,6 +369,7 @@ func (d *dispatcher) requestFromCommand(c cmdbuf.Command) *diagnose.Request {
 		Shell:      d.shellBin,
 		Cwd:        cwd,
 		Lang:       os.Getenv("LANG"),
+		Lark:       lark,
 	}
 }
 
@@ -330,16 +377,46 @@ func (d *dispatcher) dispatchAlert(dc *diagnose.Client, req *diagnose.Request) {
 	if dc == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if !hasLarkAlertTarget(req) {
+		debuglog.Logf("alert: skipped (no lark target configured)")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	go func() {
 		defer cancel()
 		debuglog.Logf("alert: start command=%q exit=%d tail=%dB", req.Command, req.ExitCode, len(req.OutputTail))
 		if err := dc.Alert(ctx, req); err != nil {
 			debuglog.Logf("alert: failed: %v", err)
+			d.notifyAlertFailure(err)
 			return
 		}
-		debuglog.Logf("alert: submitted")
+		debuglog.Logf("alert: delivered")
 	}()
+}
+
+func hasLarkAlertTarget(req *diagnose.Request) bool {
+	if req == nil {
+		return false
+	}
+	for _, target := range req.Lark.Targets {
+		if target.Enabled && strings.TrimSpace(target.ID) != "" {
+			return true
+		}
+	}
+	for _, route := range req.Lark.Forwarding.Routes {
+		if route.Enabled && strings.TrimSpace(route.Target.ID) != "" && strings.TrimSpace(route.IdentityID) != "" {
+			return true
+		}
+	}
+	return strings.TrimSpace(req.Lark.UserOpenID) != ""
+}
+
+func (d *dispatcher) notifyAlertFailure(err error) {
+	if err == nil || d == nil || d.w == nil {
+		return
+	}
+	fmt.Fprintf(d.w, "\r\ntermind: Lark alert failed: %v\r\n", err)
+	d.redrawPrompt()
 }
 
 // run 跑一次诊断: 构 Request → Start → renderer 流式消费 token → Done/Fail。
